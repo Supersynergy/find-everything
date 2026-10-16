@@ -38,6 +38,36 @@ fe status             # binaries + index health
 
 Install: grab a binary from the [Releases](https://github.com/Supersynergy/find-everything/releases) page (`fe-darwin-arm64`, `fe-darwin-x64`, `fe-linux-x64`, `fe-linux-arm64`) and put it on your `PATH` as `fe`. Or build from source: `bun build --compile ./src/cli.ts --outfile fe`.
 
+## Native app (macOS)
+
+A standalone Raycast-style panel — no Raycast needed. Borderless floating window, global `⌥Space` hotkey, two-line results with Finder icons, and a `⌘K` action panel.
+
+```bash
+./install.sh        # app → ~/Applications, fe → ~/.local/bin, no sudo
+```
+
+On first launch the app checks for `fe`/`fd`/`rg`/`fzf` and offers to download whatever is missing straight from GitHub releases into `~/Library/Application Support/FindEverything/bin` — no Homebrew, no admin rights.
+
+**Keyboard** — everything is reachable without the mouse:
+
+| Key | Action |
+|---|---|
+| `⌥Space` | toggle panel (global) |
+| `↑` `↓` `^N` `^P` `PgUp` `PgDn` `⌘↑` `⌘↓` `Home` `End` | navigate |
+| `↵` | open |
+| `⌘↵` | open containing folder |
+| `⌥↵` | reveal in Finder |
+| `⌘K` / `Tab` | action panel — type to filter, `→` enters submenus (Open With…, Switch Scope), `←`/`⎋` steps back |
+| `⌘D` / `⌘I` | detail pane (path, size, date, image + text preview) |
+| `⌘C` `⌘⇧C` `⌘⌥C` | copy path / name / file |
+| `⌘T` `⌘Y` `⌘O` | Terminal / Quick Look / reveal |
+| `⌘1`–`⌘6` `⌘⌥←` `⌘⌥→` | scopes |
+| `⌘⌫` `⌘R` `⌘W` `⌘Q` `⎋` | trash / rebuild / hide / quit / back |
+
+Mouse works too: hover selects, double-click opens, right-click opens the same actions as a context menu, and the `⋯` button in the footer opens the action panel.
+
+**Habits** — files you open land in "Recently Opened" (empty query) and rank higher next time. History lives in `~/Library/Application Support/FindEverything/opens.json`.
+
 ## Usage
 
 Open the **Find Everything** command, type at least 2 characters. Switch scope in the dropdown. Recommended: assign your preferred hotkey in Raycast Settings → Extensions → Find Everything.
@@ -46,16 +76,6 @@ Open the **Find Everything** command, type at least 2 characters. Switch scope i
 
 1. `fd` scans the scope once into `~/.cache/hypersearch/index-<scope>.txt` (stale-while-revalidate).
 2. The index is split into 8 shards; `rg` scans them **in parallel**, capped per shard — ~30 ms typical, worst-case queries stay ~30 ms instead of seconds.
-3. `fzf --filter` fuzzy-ranks the candidates; results whose basename contains all query terms float to the top.
-
-## Usage
-
-Open the **Find Everything** command, type at least 2 characters. Switch scope in the dropdown. Recommended: assign your preferred hotkey in Raycast Settings → Extensions → Find Everything.
-
-## How it works
-
-1. `fd` scans the scope once into `~/.cache/hypersearch/index-<scope>.txt` (stale-while-revalidate).
-2. `rg` fixed-string-filters the index to candidate matches (~120 ms on a 4.6M-line index).
 3. `fzf --filter` fuzzy-ranks the candidates; results whose basename contains all query terms float to the top.
 
 ## License

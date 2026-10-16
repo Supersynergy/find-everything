@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-10-16 (c)
+
+- Native macOS app `app/Find Everything.app` — SwiftUI/NSPanel floating panel, global `⌥Space` hotkey, shared `fe` engine + shared index. Build via `app/bundle-app.sh`, install via `install.sh`.
+- Onboarding: missing tools (`fe`/`fd`/`rg`/`fzf`) are downloaded from GitHub releases into `~/Library/Application Support/FindEverything/bin` — no Homebrew or admin rights.
+- Full keyboard control: `⌘K` action panel with type-to-filter and `→`/`←` submenus (Open With…, Switch Scope), `⌘↵` folder, `⌥↵` reveal, `⌘D`/`⌘I` details, `⌘Y` Quick Look, `⌘T` Terminal, `⌘⌫` Trash, `⌘1`–`⌘6` + `⌘⌥←`/`→` scopes, `⌃N`/`⌃P`/`PgUp`/`PgDn`/`Home`/`End` navigation, `⌘W` hide, `⌘Q` quit, `⎋` back (clears query first).
+- Mouse parity: hover selects, double-click opens, right-click context menu mirrors the action list, `⋯` footer button opens ⌘K panel.
+- User habits: "Recently Opened" when the query field is empty, opened items rank higher; stored in `~/Library/Application Support/FindEverything/opens.json`.
+- Detail pane shows text previews for code/text files and image previews; toast confirmations for copy/trash.
+- Keys are captured via a local event monitor — arrows and Enter now work while the search field has focus (the text field's editor previously swallowed them). Fixed `⌘K` never firing (wrong keycode 37→40) and swapped `⌘5`/`⌘6` scope keys.
+- `FE_REMOTE=1` enables a `/tmp/fe-cmd` test channel for deterministic UI automation; `FE_KEEP_VISIBLE=1` keeps the panel up for screenshots.
+- `fe` no longer crashes with EPIPE when piped into `head`.
+
 ## 2026-10-16 (b)
 
 - Standalone CLI `fe` for macOS and Linux — same engine as the Raycast extension, shared index at `~/.cache/hypersearch`. Commands: interactive picker (`fe`), `fe search`, `fe index`, `fe status`, `fe open`, `fe preview`.
