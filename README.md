@@ -64,6 +64,9 @@ On first launch the app checks for `fe`/`fd`/`rg`/`fzf` and offers to download w
 | `⌘P` | pin to top |
 | `⌘1`–`⌘6` `⌘⌥←` `⌘⌥→` | scopes |
 | `⌘⌫` `⌘R` `⌘W` `⌘Q` `⎋` | trash / rebuild / hide / quit / back |
+| `⌘/` | shortcuts cheat-sheet (also the `?` button) |
+
+Results are grouped like Raycast: **Pinned** → **Recently Used** → **Applications** → **Files & Folders**.
 
 Mouse works too: hover selects, double-click opens, rows **drag** as file references, right-click opens the same actions as a context menu (incl. Open With, Duplicate, Compress, Share), and the `⋯` button in the footer opens the action panel.
 

@@ -108,6 +108,7 @@ final class Model: ObservableObject {
   @Published private(set) var pinnedPaths: [String] = []
   var pinnedSet: Set<String> { Set(pinnedPaths) }
   @Published var lastMs = 0
+  @Published var showHelp = false
 
   func loadPins() {
     pinnedPaths = (try? JSONDecoder().decode(
@@ -167,25 +168,36 @@ final class Model: ObservableObject {
     recents = Array((pins + rest).prefix(12)).map { FEItem(path: $0) }
   }
 
-  // frecency-lite: pins first (in pin order), then previously opened
-  // results (freshest first), then everything else.
+  // Raycast-style tiers: Pinned → Recently Used → Applications → Files.
+  // Order within a tier keeps the engine's fuzzy ranking (stable bucket
+  // sort — Array.sorted is not guaranteed stable).
+  static let tierTitles = [
+    "Pinned", "Recently Used", "Applications", "Files & Folders",
+  ]
+  func tier(_ it: FEItem) -> Int {
+    if pinnedSet.contains(it.path) { return 0 }
+    if opens[it.path] != nil { return 1 }
+    if it.path.hasSuffix(".app") { return 2 }
+    return 3
+  }
+  /// Section header to render above row i (nil = none).
+  func headerBefore(_ i: Int) -> String? {
+    let l = visibleItems
+    guard i < l.count else { return nil }
+    let t = tier(l[i])
+    if i == 0 || tier(l[i - 1]) != t { return Model.tierTitles[t] }
+    return nil
+  }
   func habitBoost(_ list: [FEItem]) -> [FEItem] {
-    let pins = pinnedSet
     let d = opens
-    var pin: [FEItem] = []
-    var hit: [FEItem] = []
-    var rest: [FEItem] = []
-    for it in list {
-      if pins.contains(it.path) { pin.append(it) }
-      else if d[it.path] != nil { hit.append(it) }
-      else { rest.append(it) }
-    }
-    pin.sort {
+    var tiers: [[FEItem]] = [[], [], [], []]
+    for it in list { tiers[tier(it)].append(it) }
+    tiers[0].sort {
       (pinnedPaths.firstIndex(of: $0.path) ?? 0)
         < (pinnedPaths.firstIndex(of: $1.path) ?? 0)
     }
-    return pin
-      + hit.sorted { (d[$0.path] ?? 0) > (d[$1.path] ?? 0) } + rest
+    tiers[1].sort { (d[$0.path] ?? 0) > (d[$1.path] ?? 0) }
+    return tiers.flatMap { $0 }
   }
 
   func meta(for p: String) -> [FileAttributeKey: Any]? {
@@ -463,6 +475,7 @@ final class Model: ObservableObject {
       },
       ActItem(title: "Toggle Details", hint: "⌘D") { m, _ in m.showDetail.toggle() },
       ActItem(title: "Rebuild Index", hint: "⌘R") { m, _ in m.rebuild() },
+      ActItem(title: "Keyboard Shortcuts", hint: "⌘/") { m, _ in m.showHelp = true },
       ActItem(title: "Move to Trash", hint: "⌘⌫") { m, p in m.trash(p) },
       ActItem(title: "Quit Find Everything", hint: "⌘Q") { _, _ in NSApp.terminate(nil) },
     ]
@@ -876,13 +889,10 @@ struct SearchView: View {
               .frame(maxWidth: .infinity, maxHeight: .infinity)
           } else {
             VStack(alignment: .leading, spacing: 0) {
-              Text("RECENTLY OPENED")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.tertiary)
-                .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
               ScrollView {
                 LazyVStack(spacing: 0) {
                   ForEach(m.recents.indices, id: \.self) { i in
+                    if let h = m.headerBefore(i) { SectionLabel(h) }
                     RowView(item: m.recents[i], selected: i == m.selected,
                             meta: m.meta(for: m.recents[i].path),
                             pinned: m.pinnedSet.contains(m.recents[i].path))
@@ -910,6 +920,7 @@ struct SearchView: View {
               ScrollView {
                 LazyVStack(spacing: 0) {
                   ForEach(m.items.indices, id: \.self) { i in
+                    if let h = m.headerBefore(i) { SectionLabel(h) }
                     RowView(item: m.items[i], selected: i == m.selected,
                             meta: m.meta(for: m.items[i].path),
                             pinned: m.pinnedSet.contains(m.items[i].path))
@@ -939,21 +950,24 @@ struct SearchView: View {
       }
       .frame(maxHeight: .infinity)
       Divider()
-      HStack(spacing: 12) {
-        Hint("↵", "Open"); Hint("⌘↵", "Folder"); Hint("⌘K", "Actions")
-        Hint("⌘D", "Details"); Hint("⌘⌫", "Trash"); Hint("⎋", "Back")
-        Spacer()
+      HStack(spacing: 10) {
         if !m.toast.isEmpty {
           Text(m.toast).font(.system(size: 10))
             .foregroundStyle(.secondary)
             .transition(.opacity)
         }
+        Spacer()
         Text(m.searching
           ? "…"
           : m.query.count >= 2
             ? "\(m.items.count) results · \(m.lastMs)ms"
             : m.scope.label)
           .font(.system(size: 10)).foregroundStyle(.tertiary)
+        Button { m.showHelp = true } label: {
+          Image(systemName: "questionmark.circle")
+            .font(.system(size: 13)).foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain).help("Keyboard shortcuts ⌘/")
         Button { m.showActionsPanel() } label: {
           Image(systemName: "ellipsis.circle")
             .font(.system(size: 13)).foregroundStyle(.secondary)
@@ -967,6 +981,13 @@ struct SearchView: View {
         ActionPanelView()
           .environmentObject(m)
           .transition(.move(edge: .trailing).combined(with: .opacity))
+      }
+    }
+    .overlay(alignment: .center) {
+      if m.showHelp {
+        HelpView()
+          .environmentObject(m)
+          .transition(.opacity.combined(with: .scale(scale: 0.96)))
       }
     }
   }
@@ -1029,16 +1050,57 @@ struct ActionPanelView: View {
   }
 }
 
-struct Hint: View {
-  let key: String; let label: String
-  init(_ k: String, _ l: String) { key = k; label = l }
+struct SectionLabel: View {
+  let title: String
+  init(_ t: String) { title = t }
   var body: some View {
-    HStack(spacing: 3) {
-      Text(key).font(.system(size: 10, weight: .semibold))
-        .padding(.horizontal, 4).padding(.vertical, 2)
-        .background(.quaternary).cornerRadius(4)
-      Text(label).font(.system(size: 10)).foregroundStyle(.secondary)
+    Text(title.uppercased())
+      .font(.system(size: 9, weight: .semibold))
+      .foregroundStyle(.tertiary)
+      .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
+      .frame(maxWidth: .infinity, alignment: .leading)
+  }
+}
+
+/// ⌘/ help card — every shortcut, grouped. Not cluttering the field.
+struct HelpView: View {
+  @EnvironmentObject var m: Model
+  let groups: [(String, String)] = [
+    ("Navigate", "↑ ↓ · ^N ^P · PgUp PgDn · ⌘↑ ⌘↓ · Home End"),
+    ("Open", "↵ open · ⌘↵ folder · ⌥↵ reveal · ⌘Y quick look"),
+    ("Actions", "⌘K or Tab · type to filter · → submenu · ← back"),
+    ("File", "⌘C path · ⌘⇧C name · ⌘⌥C file · ⌘⌥⇧C contents"),
+    ("File 2", "⌘I info · ⌘P pin · ⌘⌫ trash"),
+    ("Tools", "⌘T terminal · ⌘R rebuild index"),
+    ("Scope", "⌘1–⌘6 · ⌘⌥← ⌘⌥→ cycle"),
+    ("Panel", "⌥Space toggle · ⌘W hide · ⌘Q quit · ⎋ back"),
+  ]
+  var body: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      Text("KEYBOARD SHORTCUTS")
+        .font(.system(size: 9, weight: .semibold))
+        .foregroundStyle(.tertiary)
+        .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 6)
+      ForEach(groups.indices, id: \.self) { i in
+        HStack {
+          Text(groups[i].0)
+            .font(.system(size: 11, weight: .medium))
+            .frame(width: 70, alignment: .leading)
+          Text(groups[i].1).font(.system(size: 11))
+            .foregroundStyle(.secondary)
+          Spacer()
+        }
+        .padding(.horizontal, 14).padding(.vertical, 4)
+      }
+      Text("any key closes")
+        .font(.system(size: 9)).foregroundStyle(.tertiary)
+        .padding(.horizontal, 14).padding(.vertical, 8)
     }
+    .frame(width: 380)
+    .background(.ultraThinMaterial)
+    .cornerRadius(10)
+    .overlay(RoundedRectangle(cornerRadius: 10)
+      .stroke(.quaternary, lineWidth: 1))
   }
 }
 
@@ -1109,7 +1171,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   func handleKey(_ ev: NSEvent) -> Bool {
     let m = model
-    let mods = ev.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    // Only real modifiers — arrows/nav keys carry .function on physical
+    // keyboards and .numericPad on keypads; masking those out is what
+    // makes ↑↓ actually fire on real hardware.
+    let mods = ev.modifierFlags.intersection(
+      [.command, .option, .control, .shift])
     // These work from anywhere — panel open, action menu open, typing.
     switch (mods, ev.keyCode) {
     case ([.command], 12): NSApp.terminate(nil); return true      // ⌘Q
@@ -1118,6 +1184,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       m.showActions ? (m.showActions = false) : m.showActionsPanel()
       return true
     default: break
+    }
+    // Help overlay: everything closes it, nothing else.
+    if m.showHelp {
+      m.showHelp = false
+      return true
+    }
+    if mods == [.command] && ev.keyCode == 44 {                    // ⌘/
+      m.showHelp = true
+      return true
     }
     // Action panel: its own navigation — arrows, type-to-filter, submenus.
     if m.showActions {
@@ -1162,14 +1237,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       return true
     case ([], 126), ([.control], 35):                             // ↑ / ^P
       m.selected = max(m.selected - 1, 0); return true
-    case ([], 116), ([.function], 116):                           // PgUp
+    case ([], 116):                                               // PgUp
       m.selected = max(0, m.selected - 8); return true
-    case ([], 121), ([.function], 121):                           // PgDn
+    case ([], 121):                                               // PgDn
       m.selected = min(m.selected + 8, max(0, m.visibleItems.count - 1))
       return true
-    case ([], 115), ([.function], 115), ([.command], 126):        // Home / ⌘↑
+    case ([], 115), ([.command], 126):                            // Home / ⌘↑
       m.selected = 0; return true
-    case ([], 119), ([.function], 119), ([.command], 125):        // End / ⌘↓
+    case ([], 119), ([.command], 125):                            // End / ⌘↓
       m.selected = max(0, m.visibleItems.count - 1); return true
     case ([], 36), ([], 76):                                      // ↵ open
       if let it = m.currentItem { m.open(it.path) }
@@ -1261,6 +1336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         selected=\(m.selected) actSel=\(m.actSel) actMenu=\(m.actMenu)
         showActions=\(m.showActions) filter=\(m.actFilter)
         pinned=\(m.pinnedPaths) lastMs=\(m.lastMs) toast=\(m.toast)
+        help=\(m.showHelp) sec=\(m.visibleItems.indices.prefix(6).map { m.headerBefore($0) ?? "-" })
         visible=\(panel?.isVisible == true)
         """
       try? s.write(toFile: "/tmp/fe-state",
