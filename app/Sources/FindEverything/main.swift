@@ -101,6 +101,34 @@ final class Model: ObservableObject {
   static var opensFile: URL {
     FEDirs.support.appendingPathComponent("opens.json")
   }
+  static var pinsFile: URL {
+    FEDirs.support.appendingPathComponent("pins.json")
+  }
+  /// Pinned items float above recents and are boosted over other results.
+  @Published private(set) var pinnedPaths: [String] = []
+  var pinnedSet: Set<String> { Set(pinnedPaths) }
+  @Published var lastMs = 0
+
+  func loadPins() {
+    pinnedPaths = (try? JSONDecoder().decode(
+      [String].self,
+      from: Data(contentsOf: Model.pinsFile))) ?? []
+  }
+
+  func togglePin(_ p: String) {
+    if let i = pinnedPaths.firstIndex(of: p) {
+      pinnedPaths.remove(at: i); showToast("Unpinned")
+    } else {
+      pinnedPaths.insert(p, at: 0); showToast("Pinned to top")
+    }
+    if let d = try? JSONEncoder().encode(pinnedPaths) {
+      try? FileManager.default.createDirectory(
+        at: FEDirs.support, withIntermediateDirectories: true)
+      try? d.write(to: Model.pinsFile, options: .atomic)
+    }
+    loadRecents()
+    items = habitBoost(items)
+  }
   private var opens: [String: Double] {
     guard let data = try? Data(contentsOf: Model.opensFile),
           let d = try? JSONSerialization.jsonObject(with: data)
@@ -131,22 +159,33 @@ final class Model: ObservableObject {
 
   func loadRecents() {
     let fm = FileManager.default
-    recents = opens.sorted { $0.value > $1.value }
+    let pins = pinnedPaths.filter { fm.fileExists(atPath: $0) }
+    let rest = opens.sorted { $0.value > $1.value }
       .map(\.key)
-      .filter { fm.fileExists(atPath: $0) }
+      .filter { fm.fileExists(atPath: $0) && !pinnedSet.contains($0) }
       .prefix(10)
-      .map { FEItem(path: $0) }
+    recents = Array((pins + rest).prefix(12)).map { FEItem(path: $0) }
   }
 
-  // frecency-lite: previously opened results bubble up, freshest first.
+  // frecency-lite: pins first (in pin order), then previously opened
+  // results (freshest first), then everything else.
   func habitBoost(_ list: [FEItem]) -> [FEItem] {
+    let pins = pinnedSet
     let d = opens
+    var pin: [FEItem] = []
     var hit: [FEItem] = []
     var rest: [FEItem] = []
     for it in list {
-      if d[it.path] != nil { hit.append(it) } else { rest.append(it) }
+      if pins.contains(it.path) { pin.append(it) }
+      else if d[it.path] != nil { hit.append(it) }
+      else { rest.append(it) }
     }
-    return hit.sorted { (d[$0.path] ?? 0) > (d[$1.path] ?? 0) } + rest
+    pin.sort {
+      (pinnedPaths.firstIndex(of: $0.path) ?? 0)
+        < (pinnedPaths.firstIndex(of: $1.path) ?? 0)
+    }
+    return pin
+      + hit.sorted { (d[$0.path] ?? 0) > (d[$1.path] ?? 0) } + rest
   }
 
   func meta(for p: String) -> [FileAttributeKey: Any]? {
@@ -157,6 +196,7 @@ final class Model: ObservableObject {
   }
 
   func bootstrap() {
+    loadPins()
     loadRecents()
     let missing = ["fe", "fd", "rg", "fzf"].filter { toolPath($0) == nil }
     if missing.isEmpty {
@@ -182,14 +222,26 @@ final class Model: ObservableObject {
     proc?.terminate()
     let t = q.trimmingCharacters(in: .whitespaces)
     guard t.count >= 2, !indexing else { items = []; selected = 0; return }
+    // Path passthrough: a pasted or typed absolute/~/ path that exists
+    // resolves directly — Enter opens it, no index needed.
+    let expanded = (t as NSString).expandingTildeInPath
+    if (t.hasPrefix("/") || t.hasPrefix("~")),
+       FileManager.default.fileExists(atPath: expanded) {
+      items = [FEItem(path: expanded)]
+      selected = 0
+      searching = false
+      return
+    }
     searchTask = Task {
       try? await Task.sleep(nanoseconds: 120_000_000)
       guard !Task.isCancelled else { return }
       searching = true
+      let t0 = Date()
       let out = await runTool("search", "--scope", scope.rawValue, "-n", "80", t)
       guard !Task.isCancelled else { return }
       items = habitBoost(
         out.split(separator: "\n").map { FEItem(path: String($0)) })
+      lastMs = Int(-t0.timeIntervalSinceNow * 1000)
       selected = 0
       searching = false
     }
@@ -270,6 +322,63 @@ final class Model: ObservableObject {
     selected = max(0, min(selected, visibleItems.count - 1))
     showToast("Moved to Trash")
   }
+  func duplicate(_ p: String) {
+    let ns = p as NSString
+    let dir = ns.deletingLastPathComponent
+    let ext = ns.pathExtension
+    let stem = (ns.lastPathComponent as NSString).deletingPathExtension
+    var n = 1, dst = ""
+    repeat {
+      let suffix = n == 1 ? " copy" : " copy \(n)"
+      dst = "\(dir)/\(stem)\(suffix)\(ext.isEmpty ? "" : ".\(ext)")"
+      n += 1
+    } while FileManager.default.fileExists(atPath: dst) && n < 100
+    do {
+      try FileManager.default.copyItem(atPath: p, toPath: dst)
+      showToast("Duplicated")
+    } catch { showToast("Duplicate failed") }
+  }
+  func compress(_ p: String) {
+    let dst = p + ".zip"
+    guard !FileManager.default.fileExists(atPath: dst)
+    else { showToast("Archive exists already"); return }
+    let pr = Process()
+    pr.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+    pr.arguments = ["-c", "-k", "--sequesterRsrc", "--keepParent", p, dst]
+    pr.terminationHandler = { [weak self] _ in
+      Task { @MainActor in self?.showToast("Compressed") }
+    }
+    try? pr.run()
+    showToast("Compressing…")
+  }
+  func copyContents(_ p: String) {
+    let ext = (p as NSString).pathExtension.lowercased()
+    guard DetailView.textExts.contains(ext),
+          let s = try? String(contentsOfFile: p, encoding: .utf8)
+    else { showToast("No text content"); return }
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(s, forType: .string)
+    showToast("Contents copied")
+  }
+  func getInfo(_ p: String) {
+    let safe = p.replacingOccurrences(of: "\"", with: "\\\"")
+    let pr = Process()
+    pr.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+    pr.arguments = [
+      "-e",
+      "tell application \"Finder\" to open information window of (POSIX file \"\(safe)\" as alias)",
+      "-e", "tell application \"Finder\" to activate",
+    ]
+    try? pr.run()
+  }
+  func share(_ p: String) {
+    let picker = NSSharingServicePicker(items: [URL(fileURLWithPath: p)])
+    if let v = AppDelegate.shared?.panel?.contentView {
+      picker.show(
+        relativeTo: NSRect(x: v.bounds.midX, y: 8, width: 1, height: 1),
+        of: v, preferredEdge: .minY)
+    }
+  }
   func copyPath(_ p: String) {
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(p, forType: .string)
@@ -331,6 +440,8 @@ final class Model: ObservableObject {
       }.filtered(actFilter)
     case .root: break
     }
+    let curPath = currentItem?.path ?? ""
+    let isPinned = pinnedSet.contains(curPath)
     let list: [ActItem] = [
       ActItem(title: "Open", hint: "↵") { m, p in m.open(p) },
       ActItem(title: "Open Containing Folder", hint: "⌘↵") { m, p in m.openFolder(p) },
@@ -338,9 +449,15 @@ final class Model: ObservableObject {
       ActItem(title: "Open With…", hint: "→") { m, _ in m.pushOpenWith() },
       ActItem(title: "Open in Terminal", hint: "⌘T") { m, p in m.openTerminal(p) },
       ActItem(title: "Quick Look", hint: "⌘Y") { m, p in m.quickLook(p) },
+      ActItem(title: isPinned ? "Unpin" : "Pin to Top", hint: "⌘P") { m, p in m.togglePin(p) },
       ActItem(title: "Copy Path", hint: "⌘C") { m, p in m.copyPath(p) },
       ActItem(title: "Copy Name", hint: "⌘⇧C") { m, p in m.copyName(p) },
       ActItem(title: "Copy File", hint: "⌘⌥C") { m, p in m.copyFile(p) },
+      ActItem(title: "Copy Contents", hint: "⌘⌥⇧C") { m, p in m.copyContents(p) },
+      ActItem(title: "Duplicate", hint: "") { m, p in m.duplicate(p) },
+      ActItem(title: "Compress", hint: "") { m, p in m.compress(p) },
+      ActItem(title: "Share…", hint: "") { m, p in m.share(p) },
+      ActItem(title: "Get Info", hint: "⌘I") { m, p in m.getInfo(p) },
       ActItem(title: "Switch Scope", hint: "→") { m, _ in
         m.actMenu = .scopes; m.actSel = 0; m.actFilter = ""
       },
@@ -497,6 +614,7 @@ struct RowView: View {
   let item: FEItem
   let selected: Bool
   let meta: [FileAttributeKey: Any]?
+  var pinned: Bool = false
   var isDir: Bool {
     (meta?[.type] as? FileAttributeType) == .typeDirectory
   }
@@ -505,8 +623,14 @@ struct RowView: View {
       Image(nsImage: NSWorkspace.shared.icon(forFile: item.path))
         .resizable().frame(width: 26, height: 26)
       VStack(alignment: .leading, spacing: 1) {
-        Text(item.name).font(.system(size: 13, weight: .medium))
-          .lineLimit(1).truncationMode(.middle)
+        HStack(spacing: 4) {
+          if pinned {
+            Image(systemName: "pin.fill")
+              .font(.system(size: 8)).foregroundStyle(.secondary)
+          }
+          Text(item.name).font(.system(size: 13, weight: .medium))
+            .lineLimit(1).truncationMode(.middle)
+        }
         Text(item.dir).font(.system(size: 11))
           .foregroundStyle(.secondary).lineLimit(1)
       }
@@ -695,10 +819,18 @@ struct SearchView: View {
     }
     Button("Open in Terminal") { m.openTerminal(it.path) }
     Button("Quick Look") { m.quickLook(it.path) }
+    Button(m.pinnedSet.contains(it.path) ? "Unpin" : "Pin to Top") {
+      m.togglePin(it.path)
+    }
     Divider()
     Button("Copy Path") { m.copyPath(it.path) }
     Button("Copy Name") { m.copyName(it.path) }
     Button("Copy File") { m.copyFile(it.path) }
+    Button("Copy Contents") { m.copyContents(it.path) }
+    Divider()
+    Button("Duplicate") { m.duplicate(it.path) }
+    Button("Compress") { m.compress(it.path) }
+    Button("Get Info") { m.getInfo(it.path) }
     Divider()
     Button("Move to Trash", role: .destructive) { m.trash(it.path) }
   }
@@ -752,12 +884,17 @@ struct SearchView: View {
                 LazyVStack(spacing: 0) {
                   ForEach(m.recents.indices, id: \.self) { i in
                     RowView(item: m.recents[i], selected: i == m.selected,
-                            meta: m.meta(for: m.recents[i].path))
+                            meta: m.meta(for: m.recents[i].path),
+                            pinned: m.pinnedSet.contains(m.recents[i].path))
                       .id(i)
                       .onTapGesture(count: 2) { m.open(m.recents[i].path) }
                       .onTapGesture(count: 1) { m.selected = i }
                       .onHover { if $0 { m.selected = i } }
                       .contextMenu { rowMenu(m.recents[i]) }
+                      .onDrag {
+                        NSItemProvider(
+                          object: NSURL(fileURLWithPath: m.recents[i].path))
+                      }
                   }
                 }
               }
@@ -774,12 +911,17 @@ struct SearchView: View {
                 LazyVStack(spacing: 0) {
                   ForEach(m.items.indices, id: \.self) { i in
                     RowView(item: m.items[i], selected: i == m.selected,
-                            meta: m.meta(for: m.items[i].path))
+                            meta: m.meta(for: m.items[i].path),
+                            pinned: m.pinnedSet.contains(m.items[i].path))
                       .id(i)
                       .onTapGesture(count: 2) { m.open(m.items[i].path) }
                       .onTapGesture(count: 1) { m.selected = i }
                       .onHover { if $0 { m.selected = i } }
                       .contextMenu { rowMenu(m.items[i]) }
+                      .onDrag {
+                        NSItemProvider(
+                          object: NSURL(fileURLWithPath: m.items[i].path))
+                      }
                   }
                 }
               }
@@ -808,7 +950,9 @@ struct SearchView: View {
         }
         Text(m.searching
           ? "…"
-          : m.query.count >= 2 ? "\(m.items.count) results" : m.scope.label)
+          : m.query.count >= 2
+            ? "\(m.items.count) results · \(m.lastMs)ms"
+            : m.scope.label)
           .font(.system(size: 10)).foregroundStyle(.tertiary)
         Button { m.showActionsPanel() } label: {
           Image(systemName: "ellipsis.circle")
@@ -1040,8 +1184,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       if !m.query.isEmpty { m.query = "" } else { panel?.orderOut(nil) }
       return true
     case ([], 48): m.showActionsPanel(); return true              // tab
-    case ([.command], 2), ([.command], 34):                       // ⌘D / ⌘I
-      m.showDetail.toggle(); return true
+    case ([.command], 2): m.showDetail.toggle(); return true      // ⌘D
+    case ([.command], 34):                                        // ⌘I
+      if let it = m.currentItem { m.getInfo(it.path) }; return true
+    case ([.command], 35):                                        // ⌘P
+      if let it = m.currentItem { m.togglePin(it.path) }; return true
     case ([.command], 31):                                        // ⌘O
       if let it = m.currentItem { m.reveal(it.path) }; return true
     case ([.command], 8):                                         // ⌘C
@@ -1050,6 +1197,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       if let it = m.currentItem { m.copyName(it.path) }; return true
     case ([.command, .option], 8):                                // ⌘⌥C
       if let it = m.currentItem { m.copyFile(it.path) }; return true
+    case ([.command, .option, .shift], 8):                        // ⌘⌥⇧C
+      if let it = m.currentItem { m.copyContents(it.path) }; return true
     case ([.command], 17):                                        // ⌘T
       if let it = m.currentItem { m.openTerminal(it.path) }; return true
     case ([.command], 16):                                        // ⌘Y
@@ -1103,6 +1252,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           _ = handleKey(ev)
         }
       }
+    case "state":
+      let m = model
+      let s = """
+        query=\(m.query)
+        items=\(m.items.count) top=\(m.items.prefix(3).map(\.name))
+        recents=\(m.recents.count) rtop=\(m.recents.prefix(4).map(\.name))
+        selected=\(m.selected) actSel=\(m.actSel) actMenu=\(m.actMenu)
+        showActions=\(m.showActions) filter=\(m.actFilter)
+        pinned=\(m.pinnedPaths) lastMs=\(m.lastMs) toast=\(m.toast)
+        visible=\(panel?.isVisible == true)
+        """
+      try? s.write(toFile: "/tmp/fe-state",
+                   atomically: true, encoding: .utf8)
     case "show": showPanel()
     case "hide": panel?.orderOut(nil)
     default: break

@@ -59,14 +59,15 @@ On first launch the app checks for `fe`/`fd`/`rg`/`fzf` and offers to download w
 | `⌥↵` | reveal in Finder |
 | `⌘K` / `Tab` | action panel — type to filter, `→` enters submenus (Open With…, Switch Scope), `←`/`⎋` steps back |
 | `⌘D` / `⌘I` | detail pane (path, size, date, image + text preview) |
-| `⌘C` `⌘⇧C` `⌘⌥C` | copy path / name / file |
-| `⌘T` `⌘Y` `⌘O` | Terminal / Quick Look / reveal |
+| `⌘C` `⌘⇧C` `⌘⌥C` `⌘⌥⇧C` | copy path / name / file / contents |
+| `⌘T` `⌘Y` `⌘O` `⌘I` | Terminal / Quick Look / reveal / Get Info |
+| `⌘P` | pin to top |
 | `⌘1`–`⌘6` `⌘⌥←` `⌘⌥→` | scopes |
 | `⌘⌫` `⌘R` `⌘W` `⌘Q` `⎋` | trash / rebuild / hide / quit / back |
 
-Mouse works too: hover selects, double-click opens, right-click opens the same actions as a context menu, and the `⋯` button in the footer opens the action panel.
+Mouse works too: hover selects, double-click opens, rows **drag** as file references, right-click opens the same actions as a context menu (incl. Open With, Duplicate, Compress, Share), and the `⋯` button in the footer opens the action panel.
 
-**Habits** — files you open land in "Recently Opened" (empty query) and rank higher next time. History lives in `~/Library/Application Support/FindEverything/opens.json`.
+**Habits** — files you open land in "Recently Opened" (empty query) and rank higher next time. `⌘P` pins files above everything. Paste or type a full path (`/…` or `~/…`) to open it directly. History lives in `~/Library/Application Support/FindEverything/opens.json`, pins in `pins.json`.
 
 ## Usage
 

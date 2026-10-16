@@ -12,6 +12,14 @@
 - `FE_REMOTE=1` enables a `/tmp/fe-cmd` test channel for deterministic UI automation; `FE_KEEP_VISIBLE=1` keeps the panel up for screenshots.
 - `fe` no longer crashes with EPIPE when piped into `head`.
 
+## 2026-10-16 (d)
+
+- Pins (`⌘P`): pinned files show a pin badge, lead the recents list and rank above other results; stored in `pins.json`.
+- Path passthrough: typing or pasting an existing absolute/`~/` path resolves it directly — Enter opens without touching the index.
+- Footer shows measured search latency (`80 results · 60ms`).
+- More file actions: Duplicate (`<name> copy`), Compress to zip, Copy file contents (`⌘⌥⇧C`), Share via NSSharingServicePicker, Finder Get Info on `⌘I`.
+- Result rows are draggable file references into Finder or other apps.
+
 ## 2026-10-16 (b)
 
 - Standalone CLI `fe` for macOS and Linux — same engine as the Raycast extension, shared index at `~/.cache/hypersearch`. Commands: interactive picker (`fe`), `fe search`, `fe index`, `fe status`, `fe open`, `fe preview`.
