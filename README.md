@@ -76,6 +76,22 @@ Mouse works too: hover selects, double-click opens, rows **drag** as file refere
 
 Open the **Find Everything** command, type at least 2 characters. Switch scope in the dropdown. Recommended: assign your preferred hotkey in Raycast Settings → Extensions → Find Everything.
 
+### Query operators
+
+| Operator | Example | Effect |
+|---|---|---|
+| `ext:` / `*.ext` | `invoice ext:pdf` · `*.md` | filter by extension (`;` lists: `ext:md;txt`) |
+| `in:` / bare `in` | `invoice in downloads` · `in:~/code` | scope to a folder |
+| `type:` | `type:image screenshot` | doc · image · video · audio · zip · code · app |
+| `!` | `readme !node` | exclude matches |
+| `a\|b` | `invoice\|rechnung` | OR alternation |
+| `"…"` | `"release notes"` | exact phrase |
+| `sort:` | `readme sort:new` | name · new · old · big · small |
+| `size:` | `size:>50m` | filter by file size (`>`/`<`, k/m/g) |
+| `dm:` | `dm:today report` | modified within today · week · `<n>d` |
+
+`size:`/`dm:`/`sort:` post-filter the visible top results — the flat index stores paths only, which is what keeps it at ~30 ms.
+
 ## How it works
 
 1. `fd` scans the scope once into `~/.cache/hypersearch/index-<scope>.txt` (stale-while-revalidate).

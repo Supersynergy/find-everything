@@ -104,6 +104,49 @@ final class Model: ObservableObject {
   static var pinsFile: URL {
     FEDirs.support.appendingPathComponent("pins.json")
   }
+  static var historyFile: URL {
+    FEDirs.support.appendingPathComponent("history.json")
+  }
+  /// Last queries (newest first) — ↑ at the top row cycles through them.
+  @Published var history: [String] = []
+  var histPos = -1
+  private var histDraft = ""
+
+  func loadHistory() {
+    history = (try? JSONDecoder().decode(
+      [String].self, from: Data(contentsOf: Model.historyFile))) ?? []
+  }
+  func recordQuery(_ q: String) {
+    let t = q.trimmingCharacters(in: .whitespaces)
+    guard t.count >= 2 else { return }
+    history.removeAll { $0 == t }
+    history.insert(t, at: 0)
+    if history.count > 30 { history = Array(history.prefix(30)) }
+    if let d = try? JSONEncoder().encode(history) {
+      try? FileManager.default.createDirectory(
+        at: FEDirs.support, withIntermediateDirectories: true)
+      try? d.write(to: Model.historyFile, options: .atomic)
+    }
+  }
+  func historyUp() -> Bool {
+    if histPos == -1 {
+      guard !history.isEmpty else { return false }
+      histDraft = query
+      histPos = 0
+    } else if histPos < history.count - 1 {
+      histPos += 1
+    } else { return true }
+    query = history[histPos]
+    onQueryChange(query)
+    return true
+  }
+  func historyDown() -> Bool {
+    guard histPos >= 0 else { return false }
+    histPos -= 1
+    query = histPos == -1 ? histDraft : history[histPos]
+    onQueryChange(query)
+    return true
+  }
   /// Pinned items float above recents and are boosted over other results.
   @Published private(set) var pinnedPaths: [String] = []
   var pinnedSet: Set<String> { Set(pinnedPaths) }
@@ -209,6 +252,7 @@ final class Model: ObservableObject {
 
   func bootstrap() {
     loadPins()
+    loadHistory()
     loadRecents()
     let missing = ["fe", "fd", "rg", "fzf"].filter { toolPath($0) == nil }
     if missing.isEmpty {
@@ -230,6 +274,14 @@ final class Model: ObservableObject {
   }
 
   func onQueryChange(_ q: String) {
+    // Query edits leave history mode — unless the edit IS the history
+    // entry we just navigated to (text match beats a flag: onQueryChange
+    // can fire twice — binding onChange plus an explicit call).
+    let qt = q.trimmingCharacters(in: .whitespaces)
+    if !(histPos >= 0 && histPos < history.count
+         && history[histPos] == qt) {
+      histPos = -1
+    }
     searchTask?.cancel()
     proc?.terminate()
     let t = q.trimmingCharacters(in: .whitespaces)
@@ -300,6 +352,7 @@ final class Model: ObservableObject {
   }
 
   func open(_ p: String) {
+    recordQuery(query)
     recordOpen(p)
     NSWorkspace.shared.open(URL(fileURLWithPath: p))
     hidePanel?()
@@ -313,6 +366,16 @@ final class Model: ObservableObject {
   }
   func reveal(_ p: String) {
     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)])
+    hidePanel?()
+  }
+  /// No-results fallback: ↵ with a dead query opens a web search instead
+  /// of being a dead end (Raycast fallback-command pattern).
+  func searchWeb(_ q: String) {
+    let e = q.addingPercentEncoding(
+      withAllowedCharacters: .urlQueryAllowed) ?? q
+    if let u = URL(string: "https://duckduckgo.com/?q=\(e)") {
+      NSWorkspace.shared.open(u)
+    }
     hidePanel?()
   }
   func quickLook(_ p: String) {
@@ -429,8 +492,10 @@ final class Model: ObservableObject {
   }
 
   func showActionsPanel() {
-    actMenu = .root; actSel = 0; actFilter = ""; showActions = true
+    actMenu = .root; actSel = 0; actFilter = ""
+    showActions = true; showHelp = false
   }
+  func showHelpPanel() { showHelp = true; showActions = false }
 
   var actItems: [ActItem] {
     switch actMenu {
@@ -911,9 +976,15 @@ struct SearchView: View {
             }.frame(maxHeight: .infinity, alignment: .top)
           }
         } else if m.items.isEmpty {
-          Text(m.searching ? "Searching…" : "No matches")
-            .font(.system(size: 12)).foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+          VStack(spacing: 6) {
+            Text(m.searching ? "Searching…" : "No matches")
+              .font(.system(size: 12)).foregroundStyle(.secondary)
+            if !m.searching && m.query.count > 1 {
+              Text("↵ search the web · try  ext:  in:  type:  !")
+                .font(.system(size: 10)).foregroundStyle(.tertiary)
+            }
+          }
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
           HStack(spacing: 0) {
             ScrollViewReader { proxy in
@@ -1017,11 +1088,7 @@ struct ActionPanelView: View {
               HStack {
                 Text(m.actItems[i].title).font(.system(size: 12))
                 Spacer()
-                Text(m.actItems[i].hint)
-                  .font(.system(size: 10, weight: .semibold))
-                  .foregroundStyle(.secondary)
-                  .padding(.horizontal, 5).padding(.vertical, 2)
-                  .background(.quaternary).cornerRadius(4)
+                Keycaps(m.actItems[i].hint)
               }
               .padding(.horizontal, 12).padding(.vertical, 6)
               .background(
@@ -1050,6 +1117,30 @@ struct ActionPanelView: View {
   }
 }
 
+/// Raycast-style keycaps: each character of a hint like "⌘⇧C" becomes
+/// its own little key. "→"/"↵" submenu and enter markers render the same.
+struct Keycaps: View {
+  let hint: String
+  init(_ h: String) { hint = h }
+  var body: some View {
+    HStack(spacing: 3) {
+      ForEach(Array(hint.enumerated()), id: \.offset) { _, ch in
+        Text(String(ch))
+          .font(.system(size: 10, weight: .medium, design: .rounded))
+          .foregroundStyle(.secondary)
+          .padding(.horizontal, 5).padding(.vertical, 2)
+          .background(Color.primary.opacity(0.09))
+          .cornerRadius(4)
+          .overlay(
+            RoundedRectangle(cornerRadius: 4)
+              .stroke(Color.primary.opacity(0.14), lineWidth: 0.5)
+              .padding(0.5)
+          )
+      }
+    }
+  }
+}
+
 struct SectionLabel: View {
   let title: String
   init(_ t: String) { title = t }
@@ -1067,12 +1158,15 @@ struct HelpView: View {
   @EnvironmentObject var m: Model
   let groups: [(String, String)] = [
     ("Navigate", "↑ ↓ · ^N ^P · PgUp PgDn · ⌘↑ ⌘↓ · Home End"),
+    ("History", "↑ on first row cycles past queries · ⇧Tab parent dir"),
     ("Open", "↵ open · ⌘↵ folder · ⌥↵ reveal · ⌘Y quick look"),
     ("Actions", "⌘K or Tab · type to filter · → submenu · ← back"),
     ("File", "⌘C path · ⌘⇧C name · ⌘⌥C file · ⌘⌥⇧C contents"),
     ("File 2", "⌘I info · ⌘P pin · ⌘⌫ trash"),
     ("Tools", "⌘T terminal · ⌘R rebuild index"),
     ("Scope", "⌘1–⌘6 · ⌘⌥← ⌘⌥→ cycle"),
+    ("Query", "ext:md · *.pdf · type:image · !tmp · \"exact\" · a|b"),
+    ("Query 2", "in:downloads · invoice in downloads · sort:new · size:>10m · dm:today"),
     ("Panel", "⌥Space toggle · ⌘W hide · ⌘Q quit · ⎋ back"),
   ]
   var body: some View {
@@ -1191,7 +1285,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       return true
     }
     if mods == [.command] && ev.keyCode == 44 {                    // ⌘/
-      m.showHelp = true
+      if m.showHelp { m.showHelp = false } else { m.showHelpPanel() }
       return true
     }
     // Action panel: its own navigation — arrows, type-to-filter, submenus.
@@ -1233,9 +1327,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     switch (mods, ev.keyCode) {
     case ([], 125), ([.control], 45):                             // ↓ / ^N
+      if m.histPos >= 0 { _ = m.historyDown(); return true }
       m.selected = max(0, min(m.selected + 1, m.visibleItems.count - 1))
       return true
     case ([], 126), ([.control], 35):                             // ↑ / ^P
+      if (m.selected == 0 || m.histPos >= 0) && m.historyUp() {
+        return true
+      }
       m.selected = max(m.selected - 1, 0); return true
     case ([], 116):                                               // PgUp
       m.selected = max(0, m.selected - 8); return true
@@ -1248,6 +1346,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       m.selected = max(0, m.visibleItems.count - 1); return true
     case ([], 36), ([], 76):                                      // ↵ open
       if let it = m.currentItem { m.open(it.path) }
+      else if m.query.count > 1 && !m.searching {
+        m.searchWeb(m.query) // dead query -> web fallback, not a dead end
+      }
       return true
     case ([.command], 36), ([.command], 76):                      // ⌘↵ folder
       if let it = m.currentItem { m.openFolder(it.path) }
@@ -1259,6 +1360,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       if !m.query.isEmpty { m.query = "" } else { panel?.orderOut(nil) }
       return true
     case ([], 48): m.showActionsPanel(); return true              // tab
+    case ([.shift], 48):                                          // ⇧Tab
+      // Path mode: pop one path component (Raycast's ⇧Tab = parent dir).
+      let q = m.query
+      if q.hasPrefix("/") || q.hasPrefix("~") {
+        var s = q.hasSuffix("/") ? String(q.dropLast()) : q
+        s = (s as NSString).deletingLastPathComponent
+        if s.isEmpty || s == "~" { s = s.isEmpty ? "/" : "~/" }
+        m.query = s
+        m.onQueryChange(s)
+        return true
+      }
+      return false
     case ([.command], 2): m.showDetail.toggle(); return true      // ⌘D
     case ([.command], 34):                                        // ⌘I
       if let it = m.currentItem { m.getInfo(it.path) }; return true
