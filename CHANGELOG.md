@@ -11,6 +11,7 @@
 - Dead-end rescue: `↵` on an empty result list opens a web search instead of doing nothing.
 - Shortcut hints render as Raycast-style keycaps (one cap per key, combos side-by-side); action panel and help card can no longer overlap.
 - Fixed: early `-m` exits left orphaned `rg` processes blocked on full pipes; all pipeline children are killed when fzf finishes.
+- `install.sh` now also installs a LaunchAgent so the app (and ⌥Space) starts at login.
 
 ## 2026-10-16 (c)
 
