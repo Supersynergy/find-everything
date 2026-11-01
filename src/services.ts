@@ -16,8 +16,9 @@ import {SearchProcess,SearchWork} from './search-process';
 import {learnedSelections,learningFile} from './search-learning';
 import {learningContext} from './search-ranking';
 import {createInterface} from 'node:readline';
+import {searchContents,contentPath} from './content-search';
 
-export const VERSION = "0.14.0";
+export const VERSION = "0.3.0";
 const CACHE_TTL_MS = 300000, CACHE_MAX_ENTRIES = 256, CACHE_MAX_BYTES = 16 * 1024 * 1024;
 function learningStamp(){try{const s=fs.statSync(learningFile());return `${s.mtimeMs}:${s.size}:${Math.floor(Date.now()/3600000)}`;}catch(e){if(e.code==='ENOENT')return 'none';throw e;}}
 
@@ -50,6 +51,11 @@ async function searchSnapshot(query: string, index: string, limit: number, optio
   if(!parsed.semantic&&(parsed.smart&&!parsed.sort||parsed.sort==='relevance')&&parsed.learning!==false){try{parsed.learned=learnedSelections(learningContext(parsed),index,Math.floor(Date.now()/3600000)*3600000);}catch(e){learningWarnings.push(`Local learning unavailable: ${String(e.message).slice(0,200)}`);}}
   const opts = effectiveOptions(index, options);
   const started = performance.now();
+  if(parsed.content!==undefined) {
+    if(fresh)throw new Error('Refresh document text explicitly with fe content index --index NAME');
+    const result=await searchContents(index,parsed,limit,offset);
+    return {query,normalizedQuery,index,...result,stale:true,warnings:[...result.warnings,...learningWarnings],elapsedMs:Math.round(performance.now()-started)};
+  }
   {
     await ensureIndex(index, opts, fresh, false, snapshot);
     if (parsed.semantic) return { query, normalizedQuery, index, ...await searchSounds(index, parsed, limit, offset), stale:Date.now()-fs.statSync(indexPathFor(index)).mtimeMs>Number(opts.indexMaxAgeMinutes)*60000, elapsedMs: Math.round(performance.now() - started) };
@@ -124,7 +130,7 @@ export function createApi(token: string, localSocket = false): http.Server & {ca
     const fingerprint = (file: string) => { try { const s = fs.statSync(file); return [s.mtimeMs, s.size]; } catch (e) { if (e.code === "ENOENT") return null; throw e; } };
     // Learned selections are bucketed per hour, so the bucket belongs in the key:
     // a hit from the previous hour must not replay the previous bucket.
-    const key = JSON.stringify([query, index, limit, offset,work.phase,Math.floor(Date.now()/3600000), effectiveOptions(index), fingerprint(indexPathFor(index)), fingerprint(searchIndexPath(index)), fingerprint(mediaPath(index)), fingerprint(semanticPath(index)), fingerprint(livePath()),fingerprint(learningFile()),/\b(?:favorites|fav|is|type):/i.test(normalizedQuery)?fingerprint(favoritesFile()):null]);
+    const key = JSON.stringify([query, index, limit, offset,work.phase,Math.floor(Date.now()/3600000), effectiveOptions(index), fingerprint(indexPathFor(index)), fingerprint(searchIndexPath(index)), fingerprint(mediaPath(index)), fingerprint(contentPath(index)), fingerprint(semanticPath(index)), fingerprint(livePath()),fingerprint(learningFile()),/\b(?:favorites|fav|is|type):/i.test(normalizedQuery)?fingerprint(favoritesFile()):null]);
     const hit = cache.get(key);
     // The key carries the fingerprint of every source file, so a hit can never
     // outlive a changed index; the envelope is recomputed for the current moment.
@@ -163,7 +169,7 @@ export function createApi(token: string, localSocket = false): http.Server & {ca
         const index = url.searchParams.get("index") || defaultIndex();
         const fingerprint = (p: string) => fs.existsSync(p) ? fs.statSync(p).mtimeMs : null;
         const live = liveStatus(index);
-        return send(200,{...live,revision:JSON.stringify([fingerprint(indexPathFor(index)),live.revision,fingerprint(searchIndexPath(index)),fingerprint(mediaPath(index)),fingerprint(semanticPath(index)),fingerprint(learningFile())])});
+        return send(200,{...live,revision:JSON.stringify([fingerprint(indexPathFor(index)),live.revision,fingerprint(searchIndexPath(index)),fingerprint(mediaPath(index)),fingerprint(contentPath(index)),fingerprint(semanticPath(index)),fingerprint(learningFile())])});
       }
       if (req.method === "GET" && url.pathname === "/v1/query-help") return send(200, QUERY_HELP);
       if (req.method === "GET" && url.pathname === "/v1/search") {

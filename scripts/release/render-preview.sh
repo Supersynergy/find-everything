@@ -3,6 +3,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 mkdir -p release-artifacts docs/release/images
+# Prove the synthetic filenames match the production query before drawing them.
+bun test tests/presentation.test.ts -t 'product screenshots|production search backend'
+# Pillow is an artwork-authoring prerequisite, never downloaded by this script.
+python3 -c 'from PIL import Image'
 # Use the same production-source isolation as scripts/check-keyboard.sh.
 python3 - <<'PY'
 from pathlib import Path
@@ -24,3 +28,4 @@ for source in app/Sources/FindEverything/*.swift; do
 done
 swiftc -parse-as-library -D FE_NATIVE_TESTS "${sources[@]}" release-artifacts/model-source.swift tests/native/release-preview.swift -o release-artifacts/render-preview
 release-artifacts/render-preview docs/release/images
+python3 scripts/release/compose-hero.py docs/release/images docs/release/images

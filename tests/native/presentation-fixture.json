@@ -1,0 +1,24 @@
+{
+  "root": "/Demo/Documents",
+  "query": "name:invoice ext:pdf !draft",
+  "paths": [
+    "/Demo/Documents/Finance/2026/Invoice 2026-001.pdf",
+    "/Demo/Documents/Finance/2026/Invoice 2026-018.pdf",
+    "/Demo/Documents/Clients/Acme/Invoice Acme.pdf",
+    "/Demo/Documents/Archive/May/Invoice May.pdf",
+    "/Demo/Documents/Clients/Northstar/Invoice Northstar.pdf",
+    "/Demo/Documents/Studio/Invoice Studio.pdf"
+  ],
+  "candidates": [
+    "/Demo/Documents/Finance/2026/Invoice 2026-001.pdf",
+    "/Demo/Documents/Finance/2026/Invoice 2026-018.pdf",
+    "/Demo/Documents/Clients/Acme/Invoice Acme.pdf",
+    "/Demo/Documents/Archive/May/Invoice May.pdf",
+    "/Demo/Documents/Clients/Northstar/Invoice Northstar.pdf",
+    "/Demo/Documents/Studio/Invoice Studio.pdf",
+    "/Demo/Documents/Invoices/Contract.pdf",
+    "/Demo/Documents/Finance/Invoice draft.pdf",
+    "/Demo/Documents/Studio/Invoice notes.txt",
+    "/Demo/Documents/Clients/Acme/Project brief.pdf"
+  ]
+}

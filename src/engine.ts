@@ -251,7 +251,7 @@ export async function shardIndex(file: string, dir: string): Promise<void> {
   }
 }
 
-export function rebuildIndex(scope: Scope, opts: EngineOpts): Promise<void> {
+export function rebuildIndex(scope: Scope, opts: EngineOpts, monitor?: { progress: (stats: { count: number; bytes: number }) => void; signal: AbortSignal; externalTimeout: boolean }): Promise<void> {
   opts = effectiveOptions(scope, opts);
   const file = indexPathFor(scope);
   const pending = inFlight.get(file);
@@ -263,6 +263,7 @@ export function rebuildIndex(scope: Scope, opts: EngineOpts): Promise<void> {
     const lock = `${file}.lock`;
     const release = acquireLock(lock);
     const tmp = `${file}.${randomUUID()}.tmp`;
+    const metaTmp = `${metaPathFor(scope)}.${randomUUID()}.tmp`;
     try {
     const dirs = scopePaths(scope, opts);
     if (dirs.length === 0) throw new Error(`No folders configured for ${scope}; use fe index --path FOLDER --name NAME`);
@@ -286,22 +287,54 @@ export function rebuildIndex(scope: Scope, opts: EngineOpts): Promise<void> {
     const stats = { count: 0, bytes: 0, skipped: 0 };
     const normalizer = createIndexNormalizer(budget, stats);
     const out = fs.createWriteStream(tmp, { mode: 0o600 });
-    const child = track(spawn(FD, args));
+    // The core app must work on a fresh Mac without Homebrew or downloading helpers.
+    // System find respects the explicit exclusions above, but not per-project ignore files.
+    const systemWalker = !fs.existsSync(FD) && FD === "fd";
+    const patterns = excludes.flatMap(pattern => {
+      const clean = pattern.replace(/^\/+|\/+$/g, "");
+      if (!clean) return [];
+      return [clean.includes("/") ? "-path" : "-name", clean.includes("/") ? `*/${clean}` : clean];
+    });
+    if (!opts.includeHidden) patterns.push("-name", ".*");
+    const findArgs = [...dirs];
+    if (patterns.length) {
+      const conditions: string[] = [];
+      for (let i = 0; i < patterns.length; i += 2) {
+        if (conditions.length) conditions.push("-o");
+        conditions.push(patterns[i], patterns[i + 1]);
+      }
+      findArgs.push("(", ...conditions, ")", "-prune", "-o");
+    }
+    findArgs.push("-print0");
+    const child = track(spawn(systemWalker ? "/usr/bin/find" : FD, systemWalker ? findArgs : args));
     child.stdout.setEncoding("utf8");
     let stderr = "";
     child.stderr.on("data", d => { stderr = (stderr + d).slice(-2000); });
-    const timer = setTimeout(() => child.kill("SIGKILL"), INDEX_TIMEOUT_MS);
+    // The progress supervisor enforces active time while its entire worker group can pause.
+    const timer = monitor?.externalTimeout ? undefined : setTimeout(() => child.kill("SIGKILL"), INDEX_TIMEOUT_MS);
+    monitor?.progress(stats);
+    const progressTimer = monitor ? setInterval(() => monitor.progress(stats), 200) : undefined;
     const exited = new Promise<void>((resolve, reject) => {
       child.on("error", reject);
-      child.on("close", code => code === 0 ? resolve() : reject(new Error(`fd exited ${code}: ${stderr || "scan failed or timed out"}`)));
+      child.on("close", code => {
+        // Protected macOS folders are expected; permission failures are not full coverage.
+        const permissionOnly = systemWalker && code === 1 && stderr.trim().split("\n").every(line => /: (Permission denied|Operation not permitted)$/.test(line));
+        if (code === 0 || permissionOnly) resolve();
+        else reject(new Error(`File scanner exited ${code}: ${stderr || "scan failed or timed out"}`));
+      });
     });
-    try { await Promise.all([pipeline(child.stdout, normalizer, out), exited]); }
-    finally { clearTimeout(timer); if (child.exitCode === null) child.kill("SIGKILL"); }
-    fs.renameSync(tmp, file);
-    const metaTmp = `${metaPathFor(scope)}.${randomUUID()}.tmp`;
+    try { await Promise.all([pipeline(child.stdout, normalizer, out, { signal: monitor?.signal }), exited]); }
+    finally { if (timer) clearTimeout(timer); if (progressTimer) clearInterval(progressTimer); if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }
+    monitor?.progress(stats);
     fs.writeFileSync(metaTmp, JSON.stringify({ signature: signature(scope, opts), ...stats, paths: dirs, scanStartedAt, indexedAt: new Date().toISOString() }), { mode: 0o600 });
+    // Finish both files before publishing the complete flat snapshot. Search preparation
+    // is a separately resumable derived-cache stage, not an unfinished directory scan.
+    fs.renameSync(tmp, file);
     fs.renameSync(metaTmp, metaPathFor(scope));
-    } finally { fs.rmSync(tmp, { force: true }); release(); }
+    } finally {
+      try { fs.rmSync(tmp, { force: true }); fs.rmSync(metaTmp, { force: true }); }
+      finally { release(); }
+    }
   })().finally(() => inFlight.delete(file));
 
   inFlight.set(file, job);
@@ -377,6 +410,7 @@ export interface ParsedQuery {
   learning?: boolean;
   learned?: {path:string;boost:number}[];
   semantic?: string;
+  content?: string;
   mediaFilters: NumericFilter[];
   fuzzy: string[]; // fzf filter terms ('exact, a|b, plain)
   constraints: { pattern: string; negate: boolean; literal?:string; field?:'name'; suffixes?:string[]; alternatives?:string[] }[];
@@ -451,11 +485,17 @@ export function parseQuery(q: string): ParsedQuery {
       pq.constraints.push({ pattern: `\\.${tok.slice(2)}$`,suffixes:['.'+tok.slice(2).toLowerCase()], negate: false });
       continue;
     }
+    if(/^content:$/i.test(tok))throw new Error('content: requires a literal word or quoted phrase');
     const m = tok.match(/^([a-z]+):(.+)$/i);
     if (m) {
       const k = m[1].toLowerCase();
       const v = unquote(m[2]);
       const lv = v.toLowerCase();
+      if(k==='content') {
+        if(pq.content!==undefined)throw new Error('Use one content: word or quoted phrase per query');
+        if(!v.trim()||Buffer.byteLength(v)>512||!/[\p{L}\p{N}]/u.test(v)||/[\r\n\0]/.test(v))throw new Error('content: requires a literal word or phrase, at most 512 UTF-8 bytes');
+        pq.content=v.trim();continue;
+      }
       if (MEDIA_FIELDS[k]) { pq.mediaFilters.push(...numericFilters(k, lv)); continue; }
       if(k==='favorites'||k==='fav'||((k==='is'||k==='type')&&['favorite','favorites'].includes(lv))){
         if(['true','yes','1','favorite','favorites'].includes(lv))pq.favorites=favoritePaths();

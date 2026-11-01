@@ -31,6 +31,10 @@ for source in app/Sources/FindEverything/*.swift; do
 done
 swiftc -parse-as-library -D FE_NATIVE_TESTS "${model_sources[@]}" "$FE_KEYBOARD_EVIDENCE/model-source.swift" tests/native/model.swift -o "$FE_KEYBOARD_EVIDENCE/model-test"
 "$FE_KEYBOARD_EVIDENCE/model-test"
+swiftc -parse-as-library -D FE_NATIVE_TESTS "${model_sources[@]}" "$FE_KEYBOARD_EVIDENCE/model-source.swift" tests/native/content.swift -o "$FE_KEYBOARD_EVIDENCE/content-test"
+"$FE_KEYBOARD_EVIDENCE/content-test"
+swiftc -parse-as-library -D FE_NATIVE_TESTS "${model_sources[@]}" "$FE_KEYBOARD_EVIDENCE/model-source.swift" tests/native/indexing.swift -o "$FE_KEYBOARD_EVIDENCE/indexing-test"
+"$FE_KEYBOARD_EVIDENCE/indexing-test"
 swiftc app/Sources/FindEverything/Presentation.swift tests/native-design/main.swift -o "$FE_KEYBOARD_EVIDENCE/presentation-test"
 "$FE_KEYBOARD_EVIDENCE/presentation-test"
 swiftc app/Sources/FindEverything/VirtualResults.swift app/Sources/FindEverything/WarmResults.swift tests/virtual/main.swift -o "$FE_KEYBOARD_EVIDENCE/virtual-test"

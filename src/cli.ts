@@ -19,6 +19,10 @@ import {combineIndexes} from './combine';
 import {changeFavorites} from './file-filters';
 import {updateLearning} from './search-learning';
 import {learningContext} from './search-ranking';
+import {indexContents,contentStatus,clearContents} from './content-search';
+import { startIndexJob, type IndexJob } from './index-progress';
+let activeIndexJob: IndexJob | undefined;
+let indexWorkerAbort: AbortController | undefined;
 let stopLive: (() => void) | undefined;
 let setupProcess: ChildProcess | undefined;
 function stopSetup() {
@@ -30,7 +34,7 @@ function stopSetup() {
 
 interface Flags {
   scope?: string; paths: string[]; name?: string; preset?: string; opts: EngineOpts;
-  limit: number; json: boolean; nul: boolean; tui: boolean; fresh: boolean;
+  limit: number; json: boolean; nul: boolean; tui: boolean; fresh: boolean; progress: boolean;
   replace: boolean; names: boolean; port: number; interval: number; help: boolean; version: boolean;
   socket?: string; snapshot: boolean; maxFiles: number; seconds: number; kind: string; idleSeconds: number; offset: number; parentBound: boolean; query: string; live?: boolean; liveIndexes: string[]; rows:number;sources:string[];
 }
@@ -41,7 +45,7 @@ function numeric(value: string, name: string, min: number, max: number): number 
 }
 function parseFlags(argv: string[]): { pos: string[]; flags: Flags } {
   const flags: Flags = { paths: [], opts: {}, limit: 300, json: false, nul: false, tui: false, fresh: false,
-    replace: false, names: false, port: 39217, interval: 1, help: false, version: false, snapshot: false, maxFiles: 500, seconds: 60, kind: "audio", idleSeconds: 300, offset: 0, parentBound: false, query: "",liveIndexes:[],rows:10000000,sources:[] };
+    progress: false, replace: false, names: false, port: 39217, interval: 1, help: false, version: false, snapshot: false, maxFiles: 500, seconds: 60, kind: "audio", idleSeconds: 300, offset: 0, parentBound: false, query: "",liveIndexes:[],rows:10000000,sources:[] };
   const pos: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -64,6 +68,7 @@ function parseFlags(argv: string[]): { pos: string[]; flags: Flags } {
         break;
       }
       case "--json": flags.json = true; break;
+      case "--progress-json": flags.progress = true; break;
       case "--null": case "-0": flags.nul = true; break;
       case "--tui": flags.tui = true; break;
       case "--fresh": flags.fresh = true; break;
@@ -76,7 +81,7 @@ function parseFlags(argv: string[]): { pos: string[]; flags: Flags } {
       case "--kind": flags.kind = value(); break;
       case "--idle-seconds": flags.idleSeconds = numeric(value(), a, 1, 3600); break;
       case "--offset": flags.offset = numeric(value(), a, 0, 100000000); break;
-      case "--parent": flags.parentBound = true; break;
+      case "--parent": case "--parent-bound": flags.parentBound = true; break;
       case "--live": flags.live = true; break;
       case "--live-index": flags.liveIndexes.push(value()); break;
       case "--query": {if(i+1>=argv.length)throw new Error('Missing value for --query');flags.query=argv[++i];break;}
@@ -142,6 +147,7 @@ const HELP = `fe — Find Everything ${VERSION}
   --offset <0–100000000>        result page; deep filtered pages need prepare
   --parent                      serve exits when its calling process exits
   -n, --limit <1–1000>           result limit (default 300)
+  --progress-json               index progress as NDJSON; SIGUSR2 pauses/resumes owned workers
   --json | -0, --null            JSON or NUL-separated paths
   --interval <seconds>           watcher debounce, 0.2–60 (default 1)
   --help, -h | --version, -v
@@ -151,7 +157,10 @@ Examples:
   fe search 'engine ext:ts' --index hypersearch --json
   fe search 'invoice ext:pdf' --path ~/Documents/Invoices
 
-Indexes store paths; fe enrich adds media properties with ffprobe. No full-text index.
+Path indexes store names and paths; fe content index explicitly prepares local document full-text search.
+  fe content index|status|clear --index NAME [--max-files 500 --seconds 60] [--json]
+  fe search 'content:"quarterly revenue" ext:pdf' --index NAME --json
+Text/code, extractable PDFs and macOS Office/RTF are supported within reported limits. No OCR.
 `;
 
 function selection(flags: Flags): { scope: string; opts: EngineOpts } {
@@ -176,8 +185,13 @@ async function cmdSearch(q: string, flags: Flags): Promise<void> {
   for (const p of result.paths) process.stdout.write(flags.tui ? `${p}\t${path.basename(p)}  ${path.dirname(p).replace(HOME, "~")}\n` : p + (flags.nul ? "\0" : "\n"));
 }
 
-async function cmdIndex(pos: string[], flags: Flags): Promise<void> {
+async function cmdIndex(pos: string[], flags: Flags, worker = false): Promise<void> {
   flags.paths.push(...pos);
+  let scanned = 0;
+  const emit = (event: object) => console.log(JSON.stringify(event));
+  const monitor = worker ? { signal: indexWorkerAbort!.signal, externalTimeout: true, progress: (stats: { count: number; bytes: number }) => {
+    scanned = stats.count; emit({ phase: 'scan', files: scanned, bytesRead: stats.bytes, paused: false });
+  }} : undefined;
   let selected: ReturnType<typeof selection>;
   if (flags.name) {
     if (flags.scope) throw new Error("Use --name with folders, or --index to rebuild a profile");
@@ -185,11 +199,24 @@ async function cmdIndex(pos: string[], flags: Flags): Promise<void> {
     if (profiles().some(p => p.name === item.name) && !flags.replace) throw new Error(`Index already exists: ${item.name}; use --replace`);
     if (SCOPES.includes(item.name)) throw new Error(`Reserved index name: ${item.name}`);
     selected = { scope: item.name, opts: { ...item, includeHidden: item.includeHidden ?? true, includeIgnored: item.includeIgnored ?? false } };
-    await rebuildIndex(selected.scope, selected.opts);
+    await rebuildIndex(selected.scope, selected.opts, monitor);
     saveProfile(item, flags.replace);
   } else {
     selected = selection(flags);
-    await rebuildIndex(selected.scope, selected.opts);
+    await rebuildIndex(selected.scope, selected.opts, monitor);
+  }
+  if (worker) {
+    const totalBytes = fs.statSync(indexPathFor(selected.scope)).size;
+    emit({ phase: 'prepare', files: scanned, bytesRead: 0, totalBytes, paused: false });
+    while (true) {
+      indexWorkerAbort!.signal.throwIfAborted();
+      const prepared = await prepareSearch(selected.scope, 1, 10000);
+      if (prepared.ready) break;
+      const partial = prepared as { bytesRead?: number };
+      emit({ phase: 'prepare', files: scanned, bytesRead: partial.bytesRead ?? 0, totalBytes, paused: false });
+    }
+    emit({ phase: 'complete', files: scanned, bytesRead: totalBytes, totalBytes, paused: false });
+    return;
   }
   if(fs.statSync(indexPathFor(selected.scope)).size<=32*1024*1024)await prepareSearch(selected.scope,10);
   const status = indexStatus().find(s => s.name === selected.scope) || { name: selected.scope, paths: scopePaths(selected.scope, selected.opts), bytes: fs.statSync(indexPathFor(selected.scope)).size };
@@ -280,8 +307,44 @@ async function main(): Promise<void> {
       const result = cmd === "repair-media" ? await repairMedia(scope, flags.maxFiles, flags.seconds) : await enrichMedia(scope, flags.maxFiles, flags.seconds, flags.kind);
       console.log(flags.json ? JSON.stringify(result) : `${scope}: ${"probed" in result ? result.probed : result.inspected} inspected · ${result.reused} reused · ${result.failed} failed · ${result.pending} pending`); return;
     }
+    case 'content': {
+      const {scope}=selection(flags);
+      const action=rest[0]??'status';
+      if(rest.length>1||!['index','status','clear'].includes(action))throw new Error('Use fe content index|status|clear --index NAME');
+      const result=action==='index'?await indexContents(scope,flags.maxFiles,flags.seconds):action==='clear'?await clearContents(scope):contentStatus(scope);
+      console.log(JSON.stringify(result));return;
+    }
     case "query-help": return void console.log(flags.json ? JSON.stringify(QUERY_HELP) : QUERY_HELP.examples.join("\n") + "\n\n" + QUERY_HELP.notes);
-    case "index": return cmdIndex(rest, flags);
+    case "index": {
+      if (!flags.progress) return cmdIndex(rest, flags);
+      const self = process.argv[1]?.endsWith('.ts') ? [path.resolve(process.argv[1])] : [];
+      activeIndexJob = startIndexJob(process.execPath, [...self, '_index-job', ...process.argv.slice(3)]);
+      const parentGone=()=>activeIndexJob?.cancel();
+      if(flags.parentBound){process.stdin.once('end',parentGone);process.stdin.resume();}
+      try { await activeIndexJob.done; } finally {
+        process.stdin.removeListener('end',parentGone);process.stdin.pause();activeIndexJob=undefined;
+      }
+      return;
+    }
+    case '_index-guardian': {
+      const group=Number(rest[0]);
+      if (!Number.isSafeInteger(group)||group<2) throw new Error('Invalid owned index group');
+      let disarmed=false;
+      process.stdin.setEncoding('utf8');
+      process.stdin.on('data', data => {if(String(data).includes('complete')) disarmed=true;});
+      process.stdin.on('end', () => {
+        if(disarmed) return;
+        const send=(signal:NodeJS.Signals)=>{try{process.kill(-group,signal);}catch(error){if((error as NodeJS.ErrnoException).code!=='ESRCH') throw error;}};
+        send('SIGCONT');send('SIGTERM');
+        setTimeout(()=>send('SIGKILL'),1000);
+      });
+      process.stdin.resume();return;
+    }
+    case '_index-job': {
+      indexWorkerAbort = new AbortController();
+      try { await cmdIndex(rest, flags, true); } finally { indexWorkerAbort = undefined; }
+      return;
+    }
     case "watch": return watchIndex(flags);
     case "indexes": {
       if (rest[0] === "remove") { if (!rest[1]) throw new Error("Specify the index to remove"); removeProfile(rest[1]); return; }
@@ -308,6 +371,14 @@ async function main(): Promise<void> {
   }
 }
 
-for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => { stopLive?.(); stopSetup(); closeSoundWorker(); stopChildren(); process.exit(signal === "SIGINT" ? 130 : 143); });
-process.stdout.on("error", (e: NodeJS.ErrnoException) => { if (e.code === "EPIPE") { stopChildren(); process.exit(0); } else { console.error(e.message); process.exit(1); } });
+for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => {
+  if (activeIndexJob) { activeIndexJob.cancel(); return; }
+  if (indexWorkerAbort) { indexWorkerAbort.abort(new Error('Indexing cancelled')); return; }
+  stopLive?.(); stopSetup(); closeSoundWorker(); stopChildren(); process.exit(signal === "SIGINT" ? 130 : 143);
+});
+process.stdout.on("error", (e: NodeJS.ErrnoException) => { if (e.code === "EPIPE") {
+  if (activeIndexJob) { activeIndexJob.cancel(); return; }
+  if (indexWorkerAbort) { indexWorkerAbort.abort(new Error('Index progress reader closed')); return; }
+  stopChildren(); process.exit(0);
+} else { console.error(e.message); process.exit(1); } });
 main().catch(e => { stopChildren(); console.error(`fe: ${e.message || e}`); process.exitCode = 1; });

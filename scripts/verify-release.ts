@@ -17,15 +17,17 @@ function check(ok: unknown, message: string): asserts ok { if (!ok) throw new Er
 
 const version = (JSON.parse(read("package.json")) as { version: string }).version;
 const manifest = JSON.parse(read("release-artifacts/release.json")) as Manifest;
-check(manifest.version === version && manifest.tag === `v${version}`, "Version/tag mismatch");
+check(version === '0.3.0' && manifest.version === version && manifest.tag === `v${version}`, "Version/tag mismatch");
 check(manifest.preview === true && manifest.notarized === false && manifest.architecture === "arm64", "Preview must not claim notarized, stable or universal distribution");
 check(read("src/services.ts").includes(`export const VERSION = "${version}"`), "CLI source version mismatch");
 check(read("app/bundle-app.sh").split(`<string>${version}</string>`).length === 3, "Native bundle version mismatch");
 check(read("README.md").includes(`releases/tag/v${version}`), "README does not link current release");
 check(read("docs/release/RELEASE-NOTES.md").includes("not notarized"), "Notarization limitation missing");
+check(read("README.md").includes("first app launch") && read("README.md").includes("0.3.0"), "First-run/version presentation missing");
+const productImages=['hero.png','native-light.png','native-dark.png','native-missing-index.png','native-filters.png','indexing-scan.png','indexing-progress.png','indexing-paused.png','indexing-narrow.png'];
 check(manifest.assets.length === 1 && manifest.assets[0].name === "FindEverything.app.zip", "Unexpected archive set");
 check(Array.isArray(manifest.codeFiles) && manifest.codeFiles.includes("src/engine.ts") && manifest.codeFiles.includes("app/Sources/FindEverything/main.swift"), "Build source inventory missing");
-check(manifest.codeFiles.every(path => !path.split("/").includes("..") && /^(src\/|app\/(Sources\/|MediaProbe\.swift$|FileEvents\.swift$|Package\.swift$|bundle-app\.sh$)|package\.json$)/.test(path)), "Invalid build source inventory");
+check(manifest.codeFiles.every(path => !path.split("/").includes("..") && /^(src\/|app\/(Sources\/|MediaProbe\.swift$|FileEvents\.swift$|ContentProbe\.swift$|Package\.swift$|bundle-app\.sh$)|package\.json$)/.test(path)), "Invalid build source inventory");
 for (const asset of manifest.assets) {
   check(/^[A-Za-z0-9._-]+$/.test(asset.name), "Unsafe asset path");
   const path = join(artifactDir, asset.name);
@@ -45,12 +47,17 @@ const entries = run("/usr/bin/unzip", ["-Z1", join(artifactDir, "FindEverything.
 check(entries.every(path => !path.startsWith("/") && !path.split("/").includes("..")), "Archive path traversal");
 for (const file of ["LICENSE", "THIRD-PARTY-NOTICES.md", "BUN-LICENSE.md"]) check(entries.includes(`Find Everything.app/Contents/Resources/Licenses/${file}`), `Archive lacks ${file}`);
 check(!entries.some(path => /\/(?:model|node_modules|backups)\//.test(path) || /\/\.env(?:\.|$)/.test(path)), "Private/optional payload must not ship");
-for (const image of ["hero.png", "native-light.png", "native-dark.png", "native-missing-index.png"]) {
+for (const image of productImages) {
   const png = readFileSync(join(root, "docs/release/images", image));
   check(png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), `Invalid PNG: ${image}`);
   check(png.readUInt32BE(16) >= 1000 && png.length > 4000, `Insufficient image resolution/content: ${image}`);
 }
-console.log(JSON.stringify({ local: "passed", version, signed: true, notarized: false, preview: true, assets: manifest.assets.length, images: 4 }));
+for (const name of ['fe','fe-media-probe','fe-events','fe-content-probe']) {
+  check(entries.includes(`Find Everything.app/Contents/Helpers/${name}`),`Archive lacks signed helper ${name}`);
+  run('codesign',['--verify','--strict',join(app,'Contents/Helpers',name)]);
+}
+check(read('docs/release/images/feature-map.svg').includes('<svg'), 'Feature map missing');
+console.log(JSON.stringify({ local: "passed", version, signed: true, notarized: false, preview: true, assets: manifest.assets.length, images: productImages.length+1 }));
 
 if (process.argv.includes("--published")) {
   const repo = "Supersynergy/find-everything";
@@ -70,11 +77,15 @@ if (process.argv.includes("--published")) {
   check(Buffer.from(publishedReadme.content.replaceAll("\n", ""), "base64").toString("utf8") === read("README.md"), "Default branch does not show current README");
   const tree = JSON.parse(run("gh", ["api", `repos/${repo}/git/trees/${manifest.tag}?recursive=1`])) as { truncated: boolean; tree: { path: string; sha: string; type: string }[] };
   check(tree.truncated === false, "Published source tree was truncated");
-  const images = ["hero.png", "native-light.png", "native-dark.png", "native-missing-index.png"].map(name => `docs/release/images/${name}`);
+  const images = [...productImages,'feature-map.svg'].map(name => `docs/release/images/${name}`);
   for (const path of [...manifest.codeFiles, ...images]) {
     const content = readFileSync(join(root, path));
     const blob = createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex");
     check(tree.tree.some(entry => entry.path === path && entry.type === "blob" && entry.sha === blob), `Published source/image differs from tested build input: ${path}`);
   }
-  console.log(JSON.stringify({ published: "passed", public: true, url: remote.html_url, defaultBranch: metadata.defaultBranchRef.name, digestsVerified: 3, productImages: 4 }));
+  const previous=JSON.parse(run('gh',['api',`repos/${repo}/releases/tags/v0.14.0`])) as {name:string;body:string};
+  check(previous.name.includes('Superseded') && previous.body.includes('v0.3.0'), 'Misnumbered preview is not visibly superseded');
+  const prior=JSON.parse(run('gh',['api',`repos/${repo}/releases/tags/v0.2.0`])) as {draft:boolean};
+  check(prior.draft===false,'Existing0.2.0 release must remain public');
+  console.log(JSON.stringify({ published: "passed", public: true, url: remote.html_url, defaultBranch: metadata.defaultBranchRef.name, digestsVerified: 3, productImages: images.length, previousPreview:'superseded', previousStable:'preserved' }));
 }

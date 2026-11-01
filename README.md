@@ -1,46 +1,124 @@
 # Find Everything
 
-<img src="docs/release/images/hero.png" alt="Find Everything native macOS search window, showing synthetic design files in a saved Documents index" width="1600" height="1040">
+**Find the file. Keep your flow.**
 
-**Search your files. Keep the index on your Mac.**
+Local-first file search for macOS. Find a filename across folders, combine precise filters, preview the result and get back to work. Native SwiftUI/AppKit app · JSON CLI · local API · MCP · optional Raycast extension.
 
-A native SwiftUI/AppKit file search app, a Bun-powered CLI and an optional Raycast extension. Search saved indexes by name, path, type and file properties, then open, preview or reveal the result without leaving the keyboard.
+**New in 0.3.0:** explicitly index document contents, then search with `content:"quarterly revenue"`. The first app launch also schedules an **All** path index once, with visible progress and pause/cancel controls.
 
-[**0.14.0 preview release**](https://github.com/Supersynergy/find-everything/releases/tag/v0.14.0) · [Release notes](docs/release/RELEASE-NOTES.md) · [Source licence](LICENSE) · [Third-party notices](THIRD-PARTY-NOTICES.md)
+[**Get the 0.3.0 preview**](https://github.com/Supersynergy/find-everything/releases/tag/v0.3.0) · [Features](#features) · [Search examples](#one-line-many-ways-to-find-it) · [Build from source](#build-from-source) · [Release notes](docs/release/RELEASE-NOTES.md)
 
-> **Preview, not a notarized macOS release.** The downloadable Apple Silicon build is locally signed, not signed with a trusted Developer ID or Apple-notarized. Gatekeeper may refuse it. We do not recommend disabling Gatekeeper, removing quarantine or changing privacy permissions to bypass this. Build from source with your own signing identity, or wait for a notarized release. Intel and older macOS versions have not been verified.
+> **Apple Silicon preview — not notarized.** The downloadable build is locally signed, not signed with a trusted Developer ID or Apple-notarized. Gatekeeper may refuse it. We do not recommend disabling Gatekeeper, removing quarantine or changing privacy permissions to bypass this. Build from source with your own signing identity, or wait for a notarized release. Intel and older macOS versions have not been verified.
 
-## What you can do
+![Find Everything showing six invoice PDF filename matches across Finance, Clients, Archive and Studio, using name:invoice ext:pdf !draft. Production native views with synthetic demo paths.](./docs/release/images/hero.png)
 
-- **Search a saved scope:** Documents, Downloads, Applications, a chosen folder, or a combined index. Indexing is explicit; a missing scope shows the available indexing actions.
-- **Narrow the result:** name/path/type columns, size and date filters, folders, favourites and explicit sorting.
-- **Use the keyboard:** search focus, result navigation, range selection, actions, Quick Look and Finder reveal.
-- **Keep large lists bounded:** paged results and capped caches instead of one view for every indexed file.
-- **Use the same engine elsewhere:** JSON CLI output, local Unix-socket service, MCP and optional Raycast commands.
+*The query matches the **filenames**, not a shared folder called “Invoice”. Production views, synthetic demo files; not a performance benchmark.*
 
-Optional content search and semantic audio tools require additional checkout-based setup. Models and their runtime dependencies are **not** included in the preview archive.
+## Features
 
-## Native views, light and dark
+### Find the file, not just a matching folder
 
-| Light | Dark |
+Search indexed filenames and paths, or use `name:` to match only the filename. Combine extensions, folder restrictions, exclusions and alternatives in the same line. Search Documents, Downloads, Applications, a chosen project, multiple roots or a combined saved index.
+
+### Narrow thousands of possibilities to the right few
+
+Filter by file group, extension, size, modification date or favourites. Click column headings to sort, or expand the separate filter and sort bars. Size/date filters and sorting use **cached properties**; unknown values are reported, not guessed.
+
+### Write a supported phrase instead of memorising every filter
+
+`(PDFs größer als 10 MB)` and `(Dateien aus den letzten 7 Tagen)` become local file filters. Supported English/German phrases use rules, **not a chat model**. Search details expose the translation; this is not arbitrary natural-language understanding.
+
+### Find a document by what it says
+
+Prepare document text once, then combine `content:"quarterly revenue"` with filename, folder, extension, size/date and sort filters. In the native app, open **Settings → Indexes → Index document contents**; CLI users run `fe content index --index work`.
+
+Text/code files use UTF-8; extractable PDFs use the bundled local PDFKit helper, and macOS Office/RTF uses `textutil`. The unbundled CLI fallback requires both `pdftotext` and `pdfinfo`; PDFs are skipped if their page count cannot be verified. Searches read the cache, not source document bodies, and never scan folders for this feature. Preparation is bounded and resumable. Unsupported, changed, unreadable or oversized files remain unknown—not proof of no match. Search replies keep `complete:false`: cached text cannot prove that no current document matches.
+
+**Limits:** no OCR or semantic document search. Text is capped at 2 MiB; PDF/Office inputs at 32 MiB and extracted text at 2 MiB; PDFs at 1,000 pages. Hidden paths are skipped. Cached document text is private but **not encrypted**. Re-run preparation after edits; `fe content clear --index work` clears cached text without deleting originals.
+
+### Find the right sound—or describe it
+
+Search prepared media by duration, channel count, sample rate, bitrate or image/video dimensions. `audio: duration:<1s` finds short audio by metadata, regardless of its filename. Optional local sound search ranks prepared audio by descriptions such as `(kurze düstere Lasersounds)`.
+
+**Setup matters:** media properties need explicit extraction. Sound descriptions additionally require checkout-based runtime/model setup and audio analysis. Models and their runtime dependencies are **not bundled** in the preview archive; acoustic results are approximate.
+
+### Do something with the result
+
+Quick Look with `Space`, open with `Return`, reveal in Finder, choose **Open With**, set preferred apps per extension, copy paths or open the enclosing folder in Terminal. Multi-select for batch actions; keep the app as a popup or a normal resizable window.
+
+### Keep your workflow—and your index—local
+
+Save searches with their folder/project scope, pin favourites, revisit search history and optionally learn from successful opens. Use the same query language through the CLI, permission-restricted local service, MCP or the separate Raycast extension. No hosted product account is needed for normal search.
+
+![Seven supported query examples with explicit prerequisites: filename filters, cached file properties, rule-based phrases, explicitly indexed document text, media metadata, optional sound model and workflow integrations.](./docs/release/images/feature-map.svg)
+
+### More than a search box
+
+| Capability | What it does |
 | --- | --- |
-| <img src="docs/release/images/native-light.png" alt="Light appearance with six synthetic design-file results" width="1040" height="620"> | <img src="docs/release/images/native-dark.png" alt="Dark appearance of the same native search interface and synthetic results" width="1040" height="620"> |
+| **Saved searches + favourites** | Keep a query and its scope; combine `favorites:true` with other filters. |
+| **Optional local learning** | Successful opens can improve relevance. Opt out or reset it; explicit sorts retain priority. |
+| **Quiet live updates** | The macOS file journal updates changed paths. Journal gaps are reported, not hidden behind an automatic full rescan. |
+| **Continuous result lists** | Scroll the indexed match set through a virtual native table with bounded caches—not a separate view for every file. |
+| **Visible index preparation** | First launch schedules All once; later rebuilds are explicit. Pause/resume or cancel in the footer. Scanning shows a count, not an invented percentage. |
+| **Reusable indexes** | Combine existing indexes without another filesystem traversal. |
+| **Your preferred view** | Light/dark/system appearance, text size, density, columns, visibility filters and preview options. |
+| **Useful automation** | JSON output, exact indexed-match counts, stable pages and coverage warnings for scripts and agents. |
 
-These images render the production SwiftUI/AppKit views with explicitly synthetic `/Demo/Documents` files. They are not captures of personal files, performance benchmarks or evidence of a completed accessibility audit.
+[**Full capability guide, prerequisites and source references →**](docs/FEATURES.md)
+
+## One line, many ways to find it
+
+| You want… | Try… | Preparation |
+| --- | --- | --- |
+| A phrase inside a document | `content:"quarterly revenue" ext:pdf` | Source checkout + explicit document-text index |
+| Invoice PDFs, without drafts | `name:invoice ext:pdf !draft` | Saved path index |
+| PDFs or Markdown in Downloads | `ext:pdf;md in:downloads` | An index containing Downloads |
+| Large files changed this week | `size:>10m dm:7d sort:big` | Cached size/date properties |
+| Your favourite PDFs | `favorites:true ext:pdf` | Pin files first |
+| A supported German file phrase | `(PDFs größer als 10 MB)` | Cached size properties |
+| Mono sounds under a second | `audio: duration:<1s channels:1` | Extract audio metadata |
+| Sounds by description | `(kurze düstere Lasersounds)` | Optional sound model + analysed audio |
+
+**Document contents require explicit preparation.** A normal filename/path query does not search document text; use `content:` for that. No OCR is provided. Semantic search means optional **audio** similarity, not semantic document search. Coverage remains limited by chosen roots, supported formats, exclusions, permissions and preparation.
+
+## See the filters, not just the theme
+
+![Actual native filename-filter controls with name:invoice ext:pdf !draft and six matching PDF filenames from unrelated folders. Synthetic fixture data.](./docs/release/images/native-filters.png)
+
+The filename filter excludes a fixture whose **folder** contains “Invoice” but whose filename does not. A regression test runs this example through the production search backend. Images render the production SwiftUI/AppKit views offscreen with synthetic `/Demo/Documents` paths; they are not captures of personal files or proof of interactive/accessibility verification.
 
 <details>
-<summary>Missing-index state</summary>
+<summary>Light and dark appearances</summary>
 
-<img src="docs/release/images/native-missing-index.png" alt="Missing Documents index with explicit Index Documents and Index Folder actions instead of a search result" width="1040" height="620">
+![Light native search window with six synthetic invoice filename matches.](./docs/release/images/native-light.png)
 
-A missing index is not the same as no matches. The app exposes an indexing action and does not silently start a whole-disk scan.
+![Dark native search window with the same synthetic filename-filter results.](./docs/release/images/native-dark.png)
+
+</details>
+
+<details>
+<summary>A missing index is not “no files found”</summary>
+
+![Missing Documents index with explicit Index Documents and Index Folder actions, not an empty result pretending the disk was searched.](./docs/release/images/native-missing-index.png)
+
+A missing selected scope exposes indexing actions. Separately, the first app launch schedules All once using its configured roots and exclusions. Pause, resume or cancel from the visible footer. Canceling a scan keeps the prior valid index; canceling lookup preparation keeps the newly completed path snapshot so preparation can resume.
+
+| Scanning: count, no invented percentage | Preparing the lookup: measured progress |
+| --- | --- |
+| ![Synthetic native All-index scan footer with count and pause/cancel controls.](./docs/release/images/indexing-scan.png) | ![Synthetic native preparation footer with a measured progress bar and pause/cancel controls.](./docs/release/images/indexing-progress.png) |
+
+![Synthetic paused indexing footer with a resume action.](./docs/release/images/indexing-paused.png)
+
+These are rendered production views with fixture progress, not scans of personal files or speed measurements.
+
 </details>
 
 ## Get the preview
 
 The complete app archive requires **macOS 15 or later on Apple Silicon**; its native helper binaries target macOS 15. It was built and checked on macOS 15.8.2. The source app/CLI target alone is not the compatibility floor of the complete bundle.
 
-The [release page](https://github.com/Supersynergy/find-everything/releases/tag/v0.14.0) contains:
+The [release page](https://github.com/Supersynergy/find-everything/releases/tag/v0.3.0) contains:
 
 - `FindEverything.app.zip`: Apple Silicon app with its bundled CLI and native helpers.
 - `SHA256SUMS.txt`: archive and manifest checksums.
@@ -82,18 +160,26 @@ Create one named index for a folder you deliberately choose:
 
 ```sh
 bun run src/cli.ts index --path "$HOME/Documents" --name work
-bun run src/cli.ts search 'report' --index work --json
+bun run src/cli.ts search 'name:invoice ext:pdf !draft' --index work --json
+# Cache size/date properties before filtering by them; repeat while pending > 0:
+bun run src/cli.ts properties --index work --max-files 10000 --seconds 30
 bun run src/cli.ts search 'ext:pdf size:>10m' --index work --json
 bun run src/cli.ts indexes --json
+# Explicitly cache document text; repeat while pending > 0:
+bun run src/cli.ts content index --index work --max-files 500 --seconds 30 --json
+bun run src/cli.ts search 'content:"quarterly revenue" ext:pdf' --index work --json
+bun run src/cli.ts content status --index work --json
+# Optional: remove cached text, not original documents:
+bun run src/cli.ts content clear --index work --json
 ```
 
 Once installed, replace `bun run src/cli.ts` with `fe`. Use `fe --help` for the command list. `fe mcp` provides the local MCP interface; the native app normally uses a permission-restricted Unix socket rather than an exposed remote service.
 
 ### Large indexes
 
-The flat path index is streamed to disk with backpressure. Version 0.14.0 replaces the former 1-GiB output cutoff with a finite **8-GiB maximum**, limited further by the free disk space available at the start, leaving a 256-MiB reserve in that initial budget. Timeouts, path-length checks and atomic replacement remain in place. This does not promise an index of every protected macOS file; permissions, excludes, scan time and available disk still apply.
+The flat path index is streamed to disk with backpressure. The current path index replaces the former 1-GiB output cutoff with a finite **8-GiB maximum**, limited further by the free disk space available at the start, leaving a 256-MiB reserve in that initial budget. Timeouts, path-length checks and atomic replacement remain in place. This does not promise an index of every protected macOS file; permissions, excludes, scan time and available disk still apply.
 
-A failed rebuild must not publish a partial index over the previous snapshot. Creating an All (`/`) index remains an explicit action, not something the release process runs on your Mac.
+A failed or canceled scan must not publish a partial path index over the previous snapshot. First app launch schedules All once; later full rebuilds remain explicit. Canceling derived lookup preparation retains the completed path snapshot and resumable preparation. The release process itself does not scan your Mac.
 
 ## Local data and privacy
 
@@ -101,7 +187,7 @@ Source review found no hosted product accounts, advertising or product analytics
 
 | Location | Contents |
 | --- | --- |
-| `~/.cache/hypersearch` | Derived indexes, search databases, socket metadata and logs |
+| `~/.cache/hypersearch` | Derived indexes, search databases, optional unencrypted document-text caches, socket metadata and logs |
 | `~/.config/find-everything` | Index profiles and local signing-identity pin |
 | `~/Library/Application Support/FindEverything` | Favourites, ranking/warm-view data, helpers and app rollback backups |
 | macOS user defaults for `com.supersynergy.findeverything` | Display, scope and interaction preferences |
@@ -120,4 +206,4 @@ Manual screen/keyboard/VoiceOver verification was unavailable because macOS Acce
 
 Keep changes focused and run `bun run check`; native changes also need `bash scripts/check-keyboard.sh`. Include a regression test and explain any new network access, stored data or background work. Do not commit credentials, index contents, personal screenshots or local acceptance receipts.
 
-[Report a reproducible bug](https://github.com/Supersynergy/find-everything/issues) with the version, macOS version and a privacy-clean example. Source is MIT; bundled components retain their own terms.
+[Report a reproducible bug](https://github.com/Supersynergy/find-everything/issues) with the version, macOS version and a privacy-clean example. Source is [MIT](LICENSE); bundled components retain their [own terms](THIRD-PARTY-NOTICES.md).

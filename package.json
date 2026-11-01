@@ -1,7 +1,7 @@
 {
   "$schema": "https://www.raycast.com/schemas/extension.json",
   "name": "find-everything",
-  "version": "0.14.0",
+  "version": "0.3.0",
   "title": "Find Everything",
   "description": "Instant Spotlight-free file search: persistent fd index, rg filter, fzf ranking. Finds more than Spotlight ever did.",
   "icon": "icon.png",
@@ -90,8 +90,8 @@
     "dev": "ray develop",
     "cli": "bun run src/cli.ts",
     "build-cli": "bun build --compile ./src/cli.ts --outfile dist-bin/fe",
-    "test": "bun test tests",
-    "check": "bun test tests && tsc --noEmit"
+    "test": "bun test ./tests/*.test.ts",
+    "check": "bun test ./tests/*.test.ts && tsc --noEmit"
   },
   "platforms": [
     "macOS"

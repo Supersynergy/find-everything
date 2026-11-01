@@ -4,6 +4,12 @@ import AppKit
 import SwiftUI
 import Foundation
 
+private struct PresentationFixture: Decodable {
+  let root: String
+  let query: String
+  let paths: [String]
+}
+
 @main struct ReleasePreview {
   @MainActor static func main() async throws {
     let app = NSApplication.shared
@@ -14,28 +20,36 @@ import Foundation
     ], forName: UserDefaults.argumentDomain)
     let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
     try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+    let fixtureURL = URL(fileURLWithPath: "tests/native/presentation-fixture.json")
+    let fixture = try JSONDecoder().decode(PresentationFixture.self, from: Data(contentsOf: fixtureURL))
+    precondition(fixture.query == "name:invoice ext:pdf !draft")
+    precondition(fixture.paths.count == 6 && fixture.paths.allSatisfy { path in
+      let url = URL(fileURLWithPath: path)
+      return url.lastPathComponent.localizedCaseInsensitiveContains("invoice")
+        && url.pathExtension == "pdf" && !path.localizedCaseInsensitiveContains("draft")
+        && !url.deletingLastPathComponent().path.localizedCaseInsensitiveContains("invoice")
+    }, "Demo must prove filename matches, not a matching parent folder")
     for appearance in ["light", "dark"] {
       let model = Model()
       model.autoUpdate = false
       model.display = DisplayPreferences()
       model.display.appearance = appearance
       model.display.habitRanking = false
+      model.display.showSize = false
+      model.display.showModified = false
       model.testRunTool = { args in
         precondition(args == ["indexes", "--json"], "Product images must never run external tools")
         return "[{\"name\":\"documents\",\"paths\":[\"/Demo/Documents\"],\"exists\":true,\"stale\":false}]"
       }
       model.ensureSearchService = { fatalError("Product images must never start a service") }
       await model.loadIndexes()
-      model.testSeed(paths: [
-        "/Demo/Documents/Design/Brand guidelines.pdf",
-        "/Demo/Documents/Design/Product sketches.fig",
-        "/Demo/Documents/Design/Interface notes.md",
-        "/Demo/Documents/Design/Launch checklist.txt",
-        "/Demo/Documents/Design/Presentation.key",
-        "/Demo/Documents/Design/Reference images.png"
-      ], query: "design", snapshot: "demo", selection: IndexSet(integer: 0), lead: 0, total: 6)
-      model.toast = "Demo files · native production views"
+      model.testSeed(paths: fixture.paths, query: fixture.query, snapshot: "demo", selection: IndexSet(integer: 0), lead: 0, total: fixture.paths.count)
+      model.toast = "Synthetic files · filename filters, not document content"
       try render(model, name: "native-\(appearance)", output: output, appearance: appearance)
+      if appearance == "light" {
+        model.columnFilter = .name
+        try render(model, name: "native-filters", output: output, appearance: appearance)
+      }
     }
     let missing = Model()
     missing.display = DisplayPreferences()

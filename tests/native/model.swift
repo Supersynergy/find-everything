@@ -67,7 +67,7 @@ import SwiftUI
     var rebuilt=false
     startup.scope = .home
     startup.testRunTool={args in
-      if args == ["index","--index","home"] {rebuilt=true;return ""}
+      if args == ["index","--index","home","--progress-json"] {rebuilt=true;return ""}
       precondition(args == ["indexes","--json"] && rebuilt)
       return "[{\"name\":\"home\",\"paths\":[\"/fixture/home\"],\"stale\":false,\"exists\":true}]"
     }

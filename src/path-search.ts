@@ -111,7 +111,7 @@ async function prepareSnapshot(index:string,seconds:number,maxRows:number) {
   let ready:Database|undefined;
   try{ready=openReady(index);}catch(e){if(!damagedCache(e))throw e;}
   if(ready){
-    if(getMeta(ready,'ordered')!=='1'||getMeta(ready,'rowCountVersion')!=='1'){const release=acquireLock(file+'.lock');closeCached(index);const db=new Database(file);tune(db);try{orderedIndexes(db);}finally{db.close();release();}}
+    if(getMeta(ready,'ordered')!=='1'||getMeta(ready,'rowCountVersion')!=='1'){const release=acquireLock(file+'.lock');let db:Database|undefined;try{closeCached(index);db=new Database(file);tune(db);orderedIndexes(db);}finally{try{db?.close();}finally{release();}}}
     return {...searchIndexStatus(index),reused:true};
   }
   const release=acquireLock(file+'.lock'),stage=file+'.building';let db:Database|undefined;
@@ -143,7 +143,7 @@ async function prepareSnapshot(index:string,seconds:number,maxRows:number) {
       return {...searchIndexStatus(index),processed,elapsedMs:Math.round(performance.now()-started)};
     }
     return {ready:false,index,processed,rows,bytesRead:offset,totalBytes:fs.statSync(indexPathFor(index)).size,elapsedMs:Math.round(performance.now()-started),resumable:true};
-  } finally {db?.close();release();}
+  } finally {try{db?.close();}finally{release();}}
 }
 
 export function searchIndexStatus(index:string) {
@@ -189,7 +189,7 @@ export function syncSearch(index:string) {
       setMeta(db,'indexedRows',rowCount);
       setMeta(db,'rowCountVersion',1);
     })();
-  } finally {db?.close();release();}
+  } finally {try{db?.close();}finally{release();}}
 }
 
 export async function indexProperties(index:string,maxFiles=10000,seconds=60) {

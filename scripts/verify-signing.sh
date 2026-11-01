@@ -15,19 +15,19 @@ for VERSION in 1 2; do
   APP="$WORK/v$VERSION.app"
   mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers"
   cp "$WORK/tool-$VERSION" "$APP/Contents/MacOS/FindEverything"
-  for HELPER in fe fe-media-probe fe-events; do cp "$WORK/tool-$VERSION" "$APP/Contents/Helpers/$HELPER"; done
+  for HELPER in fe fe-media-probe fe-events fe-content-probe; do cp "$WORK/tool-$VERSION" "$APP/Contents/Helpers/$HELPER"; done
   /usr/libexec/PlistBuddy -c 'Add :CFBundleIdentifier string com.supersynergy.findeverything' -c 'Add :CFBundleExecutable string FindEverything' -c "Add :CFBundleVersion string $VERSION" "$APP/Contents/Info.plist" >/dev/null
   if [ "$VERSION" = 1 ]; then export FE_INSTALLED_APP="$WORK/not-installed.app"; else export FE_INSTALLED_APP="$WORK/v1.app"; fi
   bash scripts/sign-app.sh "$APP" > "$WORK/sign-$VERSION.log" 2>&1
   codesign -d -r- "$APP" 2>&1 | sed -n 's/^designated => //p' > "$WORK/rule-$VERSION"
-  for HELPER in fe fe-media-probe fe-events; do
+  for HELPER in fe fe-media-probe fe-events fe-content-probe; do
     codesign -d -r- "$APP/Contents/Helpers/$HELPER" 2>&1 | sed -n 's/^designated => //p' > "$WORK/$HELPER-rule-$VERSION"
   done
 done
 cmp "$WORK/rule-1" "$WORK/rule-2"
 RULE=$(cat "$WORK/rule-1")
 codesign --verify --deep --strict --test-requirement "=$RULE" "$WORK/v2.app"
-for HELPER in fe fe-media-probe fe-events; do
+for HELPER in fe fe-media-probe fe-events fe-content-probe; do
   cmp "$WORK/$HELPER-rule-1" "$WORK/$HELPER-rule-2"
   HELPER_RULE=$(cat "$WORK/$HELPER-rule-1")
   codesign --verify --strict --test-requirement "=$HELPER_RULE" "$WORK/v2.app/Contents/Helpers/$HELPER"

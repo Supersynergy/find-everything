@@ -155,6 +155,8 @@ final class Model: ObservableObject {
   var testWebAction:((String)->Void)?
   var testTrashAction:((String)->Void)?
   var testRunTool:(([String]) async throws -> String)?
+  var testExecutable:String?
+  var testProcessEnvironment:[String:String]?
   #endif
   var ensureSearchService: (() -> Void)?
 
@@ -236,6 +238,26 @@ final class Model: ObservableObject {
   @Published var searching = false
   @Published var indexing = false
   @Published var indexingStatus = "Building index…"
+  @Published var indexProgress: IndexingProgress?
+  @Published var indexingTarget = ""
+  @Published private var requestedIndexPause: Bool?
+  @Published private var indexControlReady=false
+  var indexPausePending: Bool {requestedIndexPause != nil}
+  var canPauseIndexing: Bool {indexControlReady && indexProgress?.phase != .complete && indexProgress != nil && indexProc?.isRunning == true}
+
+  func toggleIndexingPause() {
+    guard canPauseIndexing,!indexPausePending,let progress=indexProgress,let running=indexProc else {return}
+    if kill(running.processIdentifier,SIGUSR2)==0 {requestedIndexPause = !progress.paused}
+    else {errorMessage="Could not change indexing state. Retry or cancel this run."}
+  }
+  private func acceptIndexProgress(_ progress: IndexingProgress,from running: Process) {
+    guard indexProc === running else {return}
+    indexProgress=progress;indexControlReady=true
+    if requestedIndexPause == progress.paused {requestedIndexPause=nil}
+  }
+  private func finishIndexing() {
+    indexing=false;indexProgress=nil;requestedIndexPause=nil;indexControlReady=false;indexingTarget="";indexingStatus="Building index…"
+  }
   private var enrichmentTask: Task<Void, Never>?
   private var indexProc: Process?
   @Published var showDetail = UserDefaults.standard.bool(forKey:"showDetail") { didSet { UserDefaults.standard.set(showDetail,forKey:"showDetail") } }
@@ -269,7 +291,12 @@ final class Model: ObservableObject {
   /// Set by the delegate; actions that hand over to another app close the panel.
   var hidePanel: (() -> Void)?
 
-  var fePath: String? { toolPath("fe") }
+  var fePath: String? {
+    #if FE_NATIVE_TESTS
+    if let testExecutable {return testExecutable}
+    #endif
+    return toolPath("fe")
+  }
   private var searchTask: Task<Void, Never>?
   private var foregroundFetch:Task<SearchReply,Error>?
   private var foregroundID=UUID()
@@ -475,7 +502,7 @@ final class Model: ObservableObject {
     loadPins()
     loadHistory()
     loadRecents()
-    let missing = ["fe", "fd", "rg", "fzf"].filter { toolPath($0) == nil }
+    let missing = ["fe"].filter { toolPath($0) == nil }
     if missing.isEmpty {
       setupNeeded = false
       ensureIndexIfNeeded()
@@ -486,7 +513,16 @@ final class Model: ObservableObject {
   }
 
   func ensureIndexIfNeeded() {
-    Task { await loadIndexes(); onQueryChange(query) }
+    Task {
+      await loadIndexes()
+      if errorMessage == nil,let indexedScopes,!UserDefaults.standard.bool(forKey:"initialAllIndex.v1") {
+        UserDefaults.standard.set(true,forKey:"initialAllIndex.v1")
+        if !indexedScopes.contains(FEScope(rawValue:"all")!) {
+          scope=FEScope(rawValue:"all")!;items=[];rebuild();return
+        }
+      }
+      if errorMessage == nil {onQueryChange(query)}
+    }
   }
 
   func loadIndexes() async {
@@ -510,6 +546,7 @@ final class Model: ObservableObject {
   }
 
   func indexFolder() {
+    guard !indexing else {return}
     let picker = NSOpenPanel()
     picker.title = "Index a folder or project"
     picker.message = "Include dotfiles and ignored work. Build and cache folders stay excluded."
@@ -533,18 +570,18 @@ final class Model: ObservableObject {
     while availableScopes.contains(where: { $0.rawValue == name }) {
       name = "\(stem)-\(suffix)"; suffix += 1
     }
-    let args = ["index", "--name", name, "--preset", respectIgnore.state == .on ? "project" : "folder", "--json"]
+    let args = ["index", "--name", name, "--preset", respectIgnore.state == .on ? "project" : "folder", "--json", "--progress-json"]
       + picker.urls.flatMap { ["--path", $0.path] }
-    indexing = true; errorMessage = nil
-    Task {
+    indexing=true;errorMessage=nil;indexingTarget=name;indexProgress=IndexingProgress()
+    enrichmentTask=Task {
       do {
         _ = try await runTool(args)
         await loadIndexes()
         if let selected = FEScope(rawValue: name) { scope = selected }
         showToast("Indexed \(name)")
-      } catch { errorMessage = error.localizedDescription }
-      indexing = false
-      if errorMessage == nil { onQueryChange(query,force:true) }
+      } catch {if !Task.isCancelled {errorMessage=error.localizedDescription}}
+      finishIndexing()
+      if errorMessage == nil && !Task.isCancelled {onQueryChange(query,force:true)}
     }
   }
 
@@ -974,6 +1011,35 @@ final class Model: ObservableObject {
     select(last ? resultCount-1 : 0,trigger:.keyboard)
   }
 
+  func prepareContents(clear: Bool = false) {
+    guard !indexing else { return }
+    indexing = true; errorMessage = nil; indexProgress = nil
+    indexingTarget = scope.label
+    indexingStatus = clear ? "Clearing cached document text…" : "Indexing document contents · Stop keeps saved progress"
+    let index = scope.rawValue
+    enrichmentTask = Task {
+      defer { finishIndexing() }
+      do {
+        var pending = 0
+        for _ in 0..<(clear ? 1 : 10) {
+          guard !Task.isCancelled else { return }
+          let args = clear ? ["content", "clear", "--index", index, "--json"] : ["content", "index", "--index", index, "--max-files", "500", "--seconds", "30", "--json"]
+          let out = try await runTool(args)
+          guard !Task.isCancelled else { return }
+          guard let reply = try JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any] else {
+            throw NSError(domain: "fe", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid document-index response. Saved progress is preserved."])
+          }
+          pending = reply["pending"] as? Int ?? 0
+          let indexed = reply["indexed"] as? Int ?? 0, skipped = reply["skipped"] as? Int ?? 0
+          indexingStatus = "\(indexed) documents indexed · \(skipped) skipped · Stop keeps saved progress"
+          if pending == 0 { break }
+        }
+        showToast(clear ? "Cached document text cleared; original files unchanged" : pending == 0 ? "Document index saved; check search coverage" : "Partial document index saved. Run again to continue.")
+        onQueryChange(query, force: true)
+      } catch { if !Task.isCancelled { errorMessage = error.localizedDescription } }
+    }
+  }
+
   func enrich(repair: Bool = false) {
     guard !indexing else { return }
     indexing = true; errorMessage = nil; indexingStatus = "Reading media metadata…"
@@ -1037,12 +1103,15 @@ final class Model: ObservableObject {
 
   func rebuild() {
     guard !indexing else { return }
-    indexing = true; errorMessage = nil
-    Task {
-      do { _ = try await runTool(["index", "--index", scope.rawValue]); await loadIndexes() }
-      catch { errorMessage = error.localizedDescription }
-      indexing = false
-      if errorMessage == nil { onQueryChange(query,force:true) }
+    let target=scope.rawValue
+    indexing=true;errorMessage=nil;indexingTarget=scope.label;indexProgress=IndexingProgress()
+    enrichmentTask=Task {
+      do {
+        _ = try await runTool(["index","--index",target,"--progress-json"])
+        if !Task.isCancelled {await loadIndexes()}
+      } catch {if !Task.isCancelled {errorMessage=error.localizedDescription}}
+      finishIndexing()
+      if errorMessage == nil && !Task.isCancelled {showToast("Search index ready");onQueryChange(query,force:true)}
     }
   }
 
@@ -1060,18 +1129,25 @@ final class Model: ObservableObject {
         let errorLock = NSLock()
         var errorData = Data()
         p.executableURL = URL(fileURLWithPath: fe)
-        p.arguments = args
+        let lifetime=Pipe()
+        p.arguments = args.contains("--progress-json") ? args+["--parent-bound"] : args
+        // EOF cancels even a paused job if this native app crashes. The writer remains
+        // owned by the Process object in this app; no polling or private PID lookup.
+        if args.contains("--progress-json") {p.standardInput=lifetime}
         p.standardOutput = pipe
         p.standardError = errors
+        #if FE_NATIVE_TESTS
+        if let environment=self.testProcessEnvironment {p.environment=environment}
+        #endif
         errors.fileHandleForReading.readabilityHandler = { handle in
           let data = handle.availableData
           errorLock.lock(); errorData.append(data.prefix(max(0, 4096 - errorData.count))); errorLock.unlock()
         }
         do { try p.run() } catch { errors.fileHandleForReading.readabilityHandler = nil; cont.resume(throwing: error); return }
-        if ["index","enrich","repair-media","semantic","prepare","properties","combine"].contains(args.first ?? "") {
+        if ["index","enrich","repair-media","semantic","prepare","properties","combine","content"].contains(args.first ?? "") {
           Task { @MainActor in
             self.indexProc = p
-            if args.first != "index" && self.enrichmentTask?.isCancelled == true { p.terminate() }
+            if self.enrichmentTask?.isCancelled == true { p.terminate() }
           }
         }
         let timeout = DispatchWorkItem {
@@ -1082,15 +1158,30 @@ final class Model: ObservableObject {
             }
           }
         }
-        DispatchQueue.global().asyncAfter(deadline: .now() + (args.first == "learn" ? 4 : args.first == "combine" ? 320 : args.first == "semantic" && args.contains("setup") ? 190 : 130), execute: timeout)
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let streaming=args.contains("--progress-json")
+        // The supervisor owns active-time budgets; a pause must not hit this wall timer.
+        if !streaming {DispatchQueue.global().asyncAfter(deadline: .now() + (args.first == "learn" ? 4 : args.first == "combine" ? 320 : args.first == "semantic" && args.contains("setup") ? 190 : 130), execute: timeout)}
+        var protocolError: Error?
+        let data: Data
+        if streaming {
+          var decoder=IndexingProgressDecoder()
+          while true {
+            let chunk=pipe.fileHandleForReading.availableData
+            if chunk.isEmpty {break}
+            do {
+              for event in try decoder.append(chunk) {Task { @MainActor in self.acceptIndexProgress(event,from:p)}}
+            } catch {protocolError=error;if p.isRunning {p.terminate()};break}
+          }
+          data=Data()
+        } else {data=pipe.fileHandleForReading.readDataToEndOfFile()}
         p.waitUntilExit()
         timeout.cancel()
         Task { @MainActor in
           if self.indexProc === p { self.indexProc = nil }
         }
         errors.fileHandleForReading.readabilityHandler = nil
-        if p.terminationStatus != 0 {
+        if let protocolError {cont.resume(throwing:protocolError)}
+        else if p.terminationStatus != 0 {
           errorLock.lock(); let message = String(data: errorData, encoding: .utf8) ?? ""; errorLock.unlock()
           cont.resume(throwing: NSError(domain: "fe", code: Int(p.terminationStatus), userInfo: [NSLocalizedDescriptionKey: message.isEmpty ? "Index or search failed (\(p.terminationStatus)). Retry or check fe status." : message.trimmingCharacters(in: .whitespacesAndNewlines)]))
         } else { cont.resume(returning: String(data: data, encoding: .utf8) ?? "") }
@@ -1826,7 +1917,7 @@ struct SearchView: View {
         }.padding(10)
       }
       Group {
-        if m.indexing {
+        if m.indexing && m.indexProgress == nil {
           VStack(spacing: 8) {
             ProgressView().scaleEffect(0.8)
             Text(m.indexingStatus).font(.system(size: 12))
@@ -1835,9 +1926,9 @@ struct SearchView: View {
           }.frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if m.items.isEmpty {
           VStack(spacing: 6) {
-            Text(m.searching ? "Searching…" : m.needsIndex ? "No saved index for this scope" : m.unknownProperties>0 ? "No matches with known file properties" : "No matches")
+            Text(m.indexing ? "Your files will appear when the index is ready" : m.searching ? "Searching…" : m.needsIndex ? "No saved index for this scope" : m.unknownProperties>0 ? "No matches with known file properties" : "No matches")
               .font(.system(size: 12)).foregroundStyle(.secondary)
-            if !m.searching && m.errorMessage == nil && m.query.count > 1 {
+            if !m.indexing && !m.searching && m.errorMessage == nil && m.query.count > 1 {
               Text(m.unknownProperties>0 ? "Size/date are unknown for \(m.unknownProperties) matching paths. See Search details." : "Try a name, ext:pdf, or open search help.")
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
             }
@@ -1868,7 +1959,8 @@ struct SearchView: View {
       HStack(spacing: 10) {
           Button { m.showOptions = true } label: { Image(systemName:"info.circle").frame(width:16,height:16) }
             .buttonStyle(.plain).help("Search details and index coverage").accessibilityLabel("Search details")
-        if let hint=m.inputHint {
+        if m.indexing {IndexingFooter(palette:palette)}
+        else if let hint=m.inputHint {
           Text(hint).font(.system(size:10)).foregroundStyle(palette.muted).lineLimit(1)
         } else if !m.toast.isEmpty {
           Text(m.toast).font(.system(size: 10))
@@ -1878,6 +1970,7 @@ struct SearchView: View {
           Text(m.resultFocused ? "Space Preview · ↵ Open · Tab Actions" : "↑↓ Results · ⌘F Search · ⌘K Actions")
             .font(.system(size:10)).foregroundStyle(palette.muted).lineLimit(1).frame(width:230,alignment:.leading)
         }
+        if !m.indexing {
         Spacer()
         Text(!m.items.isEmpty
           ? m.showingStartupCache ? "\(m.totalMatches ?? m.items.count) cached paths" : "\(m.totalMatches ?? m.items.count)\(m.resultIsProvisional ? "+" : "") results · \(m.lastMs)ms"
@@ -1893,6 +1986,7 @@ struct SearchView: View {
             .font(.system(size: 13)).foregroundStyle(.secondary)
         }
         .buttonStyle(.plain).help("Actions ⌘K").accessibilityLabel("Actions")
+        }
       }
       .foregroundStyle(palette.muted).padding(.horizontal,14).padding(.vertical,7).background(palette.surface)
     }

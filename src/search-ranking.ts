@@ -16,7 +16,7 @@ const groups=(pq:ParsedQuery)=>pq.fuzzy.map(t=>t.startsWith("'")?[t.slice(1)]:t.
 export function rankText(pq:ParsedQuery){return groups(pq).map(g=>g.join('|')).join(' ');}
 const priorities=new Map(TYPES.flatMap(t=>t.extensions.map(ext=>[ext,t.priority] as const)));
 export function contentPriority(name:string){return priorities.get(path.extname(name).slice(1).toLowerCase())??4;}
-export function learningContext(pq:ParsedQuery){return !pq.fuzzy.length&&!pq.constraints.length&&!pq.semantic&&!pq.sizeFilter&&!pq.dmFilter&&!pq.mediaFilters.length?'':JSON.stringify([rankText(pq),pq.constraints,pq.semantic,pq.sizeFilter,pq.dmFilter,pq.mediaFilters,pq.favorites!==undefined]);}
+export function learningContext(pq:ParsedQuery){return !pq.fuzzy.length&&!pq.constraints.length&&!pq.semantic&&!pq.content&&!pq.sizeFilter&&!pq.dmFilter&&!pq.mediaFilters.length?'':JSON.stringify([rankText(pq),pq.constraints,pq.semantic,pq.content,pq.sizeFilter,pq.dmFilter,pq.mediaFilters,pq.favorites!==undefined]);}
 export function relevanceScore(p:string,pq:ParsedQuery,boost=0){
   const name=path.basename(p.replace(/\/$/,'' )).toLowerCase(),terms=groups(pq),phrase=rankText(pq),stem=name.slice(0,name.length-path.extname(name).length);
   const lexical=!terms.length?0:name===phrase||stem===phrase?0:phrase&&!phrase.includes('|')&&name.startsWith(phrase)?1:terms.every(g=>g.some(t=>name.includes(t)))?2:3;

@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1274" viewBox="0 0 1800 1274"
+ role="img" aria-labelledby="feature-map-title feature-map-desc"
+ font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Arial, sans-serif">
+<title id="feature-map-title">One search line. Seven useful ways in.</title>
+<desc id="feature-map-desc">Seven query examples with their prerequisites: filename filters, cached properties, supported local rules, explicitly indexed document text, media metadata, optional sound models, and workflow integrations. Query examples are not screenshots; native views use synthetic demo paths.</desc>
+<rect width="1800" height="960" fill="#f5f6ed"/>
+<text x="80" y="76" font-size="21" font-weight="700" fill="#4b6657" letter-spacing="2">FIND EVERYTHING · QUERY EXAMPLES</text>
+<text x="77" y="146" font-size="52" font-weight="700" fill="#173e32">One search line. Seven useful ways in.</text>
+<g data-feature="filenames" transform="translate(80 210)">
+<rect width="520" height="280" rx="22" fill="#fdfdf8" stroke="#cfddd1"/>
+<text x="30" y="43" font-size="19" font-weight="700" fill="#607765">01</text>
+<text x="30" y="88" font-size="28" font-weight="700" fill="#173e32">Filenames, not just folders</text>
+<rect x="24" y="118" width="472" height="74" rx="12" fill="#e9f0e4"/>
+<text x="40" y="163" font-size="22" fill="#173e32" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">name:invoice ext:pdf !draft</text>
+<text x="30" y="241" font-size="22" fill="#486356">Filename filters</text>
+</g>
+<g data-feature="properties" transform="translate(640 210)">
+<rect width="520" height="280" rx="22" fill="#fdfdf8" stroke="#cfddd1"/>
+<text x="30" y="43" font-size="19" font-weight="700" fill="#607765">02</text>
+<text x="30" y="88" font-size="28" font-weight="700" fill="#173e32">Narrow it down</text>
+<rect x="24" y="118" width="472" height="74" rx="12" fill="#e9f0e4"/>
+<text x="40" y="163" font-size="22" fill="#173e32" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">size:&gt;10m dm:7d sort:big</text>
+<text x="30" y="241" font-size="22" fill="#486356">Cached properties required</text>
+</g>
+<g data-feature="phrases" transform="translate(1200 210)">
+<rect width="520" height="280" rx="22" fill="#fdfdf8" stroke="#cfddd1"/>
+<text x="30" y="43" font-size="19" font-weight="700" fill="#607765">03</text>
+<text x="30" y="88" font-size="28" font-weight="700" fill="#173e32">Ask with supported phrases</text>
+<rect x="24" y="118" width="472" height="74" rx="12" fill="#e9f0e4"/>
+<text x="40" y="163" font-size="22" fill="#173e32" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">(PDFs größer als 10 MB)</text>
+<text x="30" y="241" font-size="22" fill="#486356">Local rules · no model</text>
+</g>
+<g data-feature="contents" transform="translate(80 524)">
+<rect width="520" height="280" rx="22" fill="#fdfdf8" stroke="#cfddd1"/>
+<text x="30" y="43" font-size="19" font-weight="700" fill="#607765">04</text>
+<text x="30" y="88" font-size="28" font-weight="700" fill="#173e32">Find what a document says</text>
+<rect x="24" y="118" width="472" height="74" rx="12" fill="#e9f0e4"/>
+<text x="40" y="163" font-size="22" fill="#173e32" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">content:"quarterly revenue"</text>
+<text x="30" y="241" font-size="22" fill="#486356">Explicit document-text index</text>
+</g>
+<g data-feature="media" transform="translate(640 524)">
+<rect width="520" height="280" rx="22" fill="#fdfdf8" stroke="#cfddd1"/>
+<text x="30" y="43" font-size="19" font-weight="700" fill="#607765">05</text>
+<text x="30" y="88" font-size="28" font-weight="700" fill="#173e32">Find the right media</text>
+<rect x="24" y="118" width="472" height="74" rx="12" fill="#e9f0e4"/>
+<text x="40" y="163" font-size="22" fill="#173e32" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">audio: duration:&lt;1s channels:1</text>
+<text x="30" y="241" font-size="22" fill="#486356">Metadata setup required</text>
+</g>
+<g data-feature="sound" transform="translate(1200 524)">
+<rect width="520" height="280" rx="22" fill="#fdfdf8" stroke="#cfddd1"/>
+<text x="30" y="43" font-size="19" font-weight="700" fill="#607765">06</text>
+<text x="30" y="88" font-size="28" font-weight="700" fill="#173e32">Describe a sound</text>
+<rect x="24" y="118" width="472" height="74" rx="12" fill="#e9f0e4"/>
+<text x="40" y="163" font-size="22" fill="#173e32" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">(kurze düstere Lasersounds)</text>
+<text x="30" y="241" font-size="22" fill="#486356">Optional model setup</text>
+</g>
+<g data-feature="workflow" transform="translate(640 838)">
+<rect width="520" height="280" rx="22" fill="#fdfdf8" stroke="#cfddd1"/>
+<text x="30" y="43" font-size="19" font-weight="700" fill="#607765">07</text>
+<text x="30" y="88" font-size="28" font-weight="700" fill="#173e32">Stay in your workflow</text>
+<rect x="24" y="118" width="472" height="74" rx="12" fill="#e9f0e4"/>
+<text x="40" y="163" font-size="22" fill="#173e32" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">CLI · local API · MCP · Raycast</text>
+<text x="30" y="241" font-size="22" fill="#486356">Raycast: source build</text>
+</g>
+<path d="M80 1167H1720" stroke="#cbd9cd"/>
+<text x="80" y="1217" font-size="24" fill="#486356">Query examples, not screenshots; native views use synthetic demo paths.</text>
+</svg>

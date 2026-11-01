@@ -15,6 +15,7 @@ mkdir -p "$APP/Contents/Resources/Licenses"
 cp ../LICENSE ../THIRD-PARTY-NOTICES.md ../docs/release/BUN-LICENSE.md "$APP/Contents/Resources/Licenses/"
 swiftc -O MediaProbe.swift -o "$APP/Contents/Helpers/fe-media-probe"
 swiftc -O FileEvents.swift -o "$APP/Contents/Helpers/fe-events"
+swiftc -swift-version 6 -O ContentProbe.swift -o "$APP/Contents/Helpers/fe-content-probe"
 
 # icon.icns from the repo PNG via iconset + iconutil
 ICONWORK=$(mktemp -d)
@@ -38,8 +39,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>com.supersynergy.findeverything</string>
   <key>CFBundleExecutable</key><string>FindEverything</string>
   <key>CFBundleIconFile</key><string>icon</string>
-  <key>CFBundleVersion</key><string>0.14.0</string>
-  <key>CFBundleShortVersionString</key><string>0.14.0</string>
+  <key>CFBundleVersion</key><string>0.3.0</string>
+  <key>CFBundleShortVersionString</key><string>0.3.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSUIElement</key><true/>
   <key>LSMinimumSystemVersion</key><string>15.0</string>

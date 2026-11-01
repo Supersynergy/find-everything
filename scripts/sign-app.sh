@@ -18,7 +18,7 @@ if [ -d "$INSTALLED" ]; then
   PREVIOUS=$(codesign -d -r- "$INSTALLED" 2>&1 | sed -n 's/.*certificate leaf = H"\([[:xdigit:]]*\)".*/\1/p')
   if [ -n "$PREVIOUS" ] && [ "$(printf %s "$PREVIOUS" | tr '[:lower:]' '[:upper:]')" != "$(printf %s "$IDENTITY" | tr '[:lower:]' '[:upper:]')" ]; then echo 'Refusing to rotate the installed app identity implicitly.' >&2; exit 1; fi
 fi
-for NAME in fe fe-media-probe fe-events; do
+for NAME in fe fe-media-probe fe-events fe-content-probe; do
   codesign --force --sign "$IDENTITY" --timestamp=none --preserve-metadata=entitlements --identifier "com.supersynergy.findeverything.$NAME" "$APP/Contents/Helpers/$NAME"
 done
 codesign --force --sign "$IDENTITY" --timestamp=none "$APP"

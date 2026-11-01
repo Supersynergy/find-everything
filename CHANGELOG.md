@@ -1,6 +1,23 @@
 # Changelog
 
-## 0.14.0 — 2026-11-01 (preview)
+## 0.3.0 — 2026-11-01 (preview; correct sequence after 0.2.0)
+
+- Correct the previously published 0.14.0 label to 0.3.0. Keep the earlier preview visibly superseded rather than silently deleting published history.
+- First app launch schedules the All path index once; existing All snapshots are reused. Show a compact footer with real file count, measured preparation percentage, a contrasted progress bar, Pause/Continue and phase-specific Cancel behaviour.
+- Pause stops owned disk/CPU workers and excludes paused time from timeouts. Independent supervisor and native-parent lifetime guards prevent paused orphan workers; isolated source/compiled/native regressions exercise the controls.
+- Core indexing uses macOS system find when optional fd is absent, without downloading helpers or requiring Homebrew. Explicit exclusions, resource bounds and macOS permissions remain; fallback project-ignore interpretation is not promised.
+
+- Add explicit local document full-text indexing and `content:` search across native app, CLI and shared API/MCP/Raycast search. Support bounded UTF-8 text/code, extractable PDFs through a bundled PDFKit helper, and macOS Office/RTF extraction; report unsupported/stale coverage and provide private, unencrypted cache clearing without touching originals. No OCR or query-time directory/content scans. Cached zero results never claim exhaustive current-filesystem coverage.
+- Enforce the same 1,000-page PDF limit in the optional `pdftotext` fallback using bounded `pdfinfo` verification. Skip oversized or unverifiable PDFs rather than caching partial text; both subprocesses share the extraction deadline.
+- Add content parser, filtering/pagination, snapshot invalidation, extraction/privacy and native preparation/recovery regressions. Scope test discovery to repository test files rather than duplicate release-worktree copies.
+
+- Rebuilt the GitHub feature presentation from a source-backed capability audit, with copyable queries and explicit native/CLI/Raycast, metadata and optional sound-setup boundaries. Removed the unsupported optional document-content-search claim from the release presentation.
+- Replaced parent-folder-only demo results with a shared filename-search fixture spanning unrelated folders. Production-backend regressions verify the illustrated query, including folder-only, draft and wrong-extension distractors.
+- Added a native filter-control image, reproducible hero artwork and an accessible seven-card query-example graphic. Synthetic data, optional setup and the distinction between examples and captured results remain explicit; no app runtime dependency or benchmark claim is added.
+
+## 0.14.0 — 2026-11-01 (superseded numbering mistake)
+
+This preview label was incorrect. Use 0.3.0; the intended sequence is 0.2.0 → 0.3.0.
 
 - Large indexes: replace the 1-GiB streamed-output cutoff with a finite 8-GiB disk budget limited by initial free space minus a 256-MiB reserve. Preserve backpressure, path guards, scan timeout and atomic replacement. Regression tests cross the old accounting threshold without a full scan.
 - Release installation pins the expected publisher and requires Gatekeeper approval before changing an existing installation; unapproved preview downloads are rejected.

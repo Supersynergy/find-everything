@@ -92,8 +92,9 @@ export function acquireLock(file: string): () => void {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const fd = fs.openSync(file, "wx", 0o600);
-      fs.writeFileSync(fd, String(process.pid));
-      return () => { fs.closeSync(fd); fs.rmSync(file, { force: true }); };
+      try { fs.writeFileSync(fd, String(process.pid)); }
+      catch (error) { try { fs.closeSync(fd); } finally { fs.rmSync(file, { force: true }); } throw error; }
+      return () => { try { fs.closeSync(fd); } finally { fs.rmSync(file, { force: true }); } };
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
       let abandoned = false;

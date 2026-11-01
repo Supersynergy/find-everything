@@ -1,6 +1,6 @@
 # Release engineering and compliance register
 
-Snapshot: 2026-11-01 · source baseline `8b3a3d2bfc34e57cde29e82321991484ab754137` plus the 0.14.0 release changes.
+Snapshot: 2026-11-01 · source baseline `48a52dd` plus the 0.3.0 release changes. The earlier 0.14.0 label was incorrect and is superseded by 0.3.0; this is not a notarized stable release.
 
 **Engineering guidance, not legal advice. No legal, security or accessibility certification.** `RUNTIME` means exercised; `CODE` means source reviewed; `DEDUCED` means inferred. An unknown is not a pass.
 
@@ -21,6 +21,15 @@ Confirmed in source: native macOS application, local CLI and optional Raycast in
 | R7 | LAWYER | DEDUCED: optional audio-model conversion terms need verification | Weights/runtime dependencies are not redistributed in the preview archive. Verify exact conversion provenance and notices before any model redistribution. |
 | R8 | MEDIUM | CODE: native focus/border contrast and labels | Shared colour pairs adjusted and computed; scope/help/actions labels added. Actual assistive-technology verification remains open. |
 | R9 | HIGH | RUNTIME: user reports All (/) indexing aborting at 1 GiB | Fixed with an 8-GiB maximum disk-output budget further bounded by initial free space minus 256 MiB, retaining streaming/backpressure and atomic replacement. RUNTIME: five shard/budget tests pass, including seeded accounting across 1 GiB, budget rejection and path guards. No real >1-GiB scan was run; this is not proof of whole-disk coverage. |
+
+## 0.3.0 review delta
+
+- **RUNTIME:** Six isolated index-control regressions cover real group pause/resume, cancellation while paused preserving the old scan snapshot, supervisor death while paused, native-parent lifetime-pipe EOF, active-time accounting and the no-Homebrew system scanner. No personal disk scan was run. The compiled CLI is tested separately; the native model also exercises its actual compiled child, pause/resume acknowledgement and cancellation.
+- **RUNTIME:** First-run model tests schedule All once, reuse existing All snapshots and restore the test preference state. Progress framing is bounded; scan totals are unknown, preparation percentages are measured and remain below 100% until finalization. Four synthetic native footer images cover scan/progress/paused/narrow states. No manual VoiceOver or full interactive-window audit is claimed.
+- **CODE:** Automatic first-run **path** indexing is now product behaviour, not installer opt-in to a background daemon. macOS permissions and configured exclusions remain. No project-ignore interpretation is promised for the system-find fallback. Existing watcher/maintenance configuration is not replaced.
+- **CODE:** Cancel during the streaming scan leaves the previous published snapshot; cancel during search preparation retains the newly completed path snapshot and resumable derived preparation. The original files are not modified. This is not a transaction spanning arbitrary process crashes or a tested disaster restore.
+- **CODE:** Document-body extraction is separate and explicit. Private owner-only local SQLite text caches are **unencrypted**; Clear removes cached content, not source documents, and is not a forensic-erasure guarantee. PDF input/page/output/time bounds and local stdin extraction were independently read. Content search conservatively reports non-exhaustive current-filesystem coverage even for a prepared cache.
+- **Independent source review:** durable, bulletproof, lean, evidence-led-ui and compliance-guard reports were collected. The lifecycle review found a native-parent death gap; the added lifetime pipe and EOF regression address it. UI target naming was added to the accessible label. These are scoped reports, not product-wide legal/security/accessibility certificates. Existing coverage rows below retain their earlier scope and do not become a new whole-product pass.
 
 ## Numbered pre-deploy coverage
 
