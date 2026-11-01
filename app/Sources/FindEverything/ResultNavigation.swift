@@ -80,4 +80,3 @@ struct SearchRequestGate {
     lastKey=key;return true
   }
 }
-
