@@ -1,6 +1,6 @@
 # Release engineering and compliance register
 
-Snapshot: 2026-11-01 · source baseline `48a52dd` plus the 0.3.0 release changes. The earlier 0.14.0 label was incorrect and is superseded by 0.3.0; this is not a notarized stable release.
+Snapshot: 2026-11-01 · source baseline `48a52dd` plus the 0.3.0 release changes. The earlier 0.14.0 label was incorrect. Following explicit owner authorization, its public release, downloads and tag were removed after verification of 0.3.0; local rollback copies are retained. This is not a notarized stable release.
 
 **Engineering guidance, not legal advice. No legal, security or accessibility certification.** `RUNTIME` means exercised; `CODE` means source reviewed; `DEDUCED` means inferred. An unknown is not a pass.
 

@@ -2,7 +2,7 @@
 
 ## 0.3.0 — 2026-11-01 (preview; correct sequence after 0.2.0)
 
-- Correct the previously published 0.14.0 label to 0.3.0. Keep the earlier preview visibly superseded rather than silently deleting published history.
+- Correct the previously published 0.14.0 label to 0.3.0. After 0.3.0 was verified, the owner explicitly requested deletion of the incorrect public release, its downloads and tag. Local rollback copies are retained; 0.2.0 and 0.3.0 are unchanged.
 - First app launch schedules the All path index once; existing All snapshots are reused. Show a compact footer with real file count, measured preparation percentage, a contrasted progress bar, Pause/Continue and phase-specific Cancel behaviour.
 - Pause stops owned disk/CPU workers and excludes paused time from timeouts. Independent supervisor and native-parent lifetime guards prevent paused orphan workers; isolated source/compiled/native regressions exercise the controls.
 - Core indexing uses macOS system find when optional fd is absent, without downloading helpers or requiring Homebrew. Explicit exclusions, resource bounds and macOS permissions remain; fallback project-ignore interpretation is not promised.
@@ -15,7 +15,7 @@
 - Replaced parent-folder-only demo results with a shared filename-search fixture spanning unrelated folders. Production-backend regressions verify the illustrated query, including folder-only, draft and wrong-extension distractors.
 - Added a native filter-control image, reproducible hero artwork and an accessible seven-card query-example graphic. Synthetic data, optional setup and the distinction between examples and captured results remain explicit; no app runtime dependency or benchmark claim is added.
 
-## 0.14.0 — 2026-11-01 (superseded numbering mistake)
+## 0.14.0 — 2026-11-01 (withdrawn numbering mistake)
 
 This preview label was incorrect. Use 0.3.0; the intended sequence is 0.2.0 → 0.3.0.
 

@@ -3,6 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import { verifyGitHubAbsent } from "./release/github-absence";
 
 interface Asset { name: string; bytes: number; sha256: string }
 interface Manifest { version: string; tag: string; architecture: string; preview: boolean; notarized: boolean; assets: Asset[]; codeFiles: string[] }
@@ -83,9 +84,13 @@ if (process.argv.includes("--published")) {
     const blob = createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex");
     check(tree.tree.some(entry => entry.path === path && entry.type === "blob" && entry.sha === blob), `Published source/image differs from tested build input: ${path}`);
   }
-  const previous=JSON.parse(run('gh',['api',`repos/${repo}/releases/tags/v0.14.0`])) as {name:string;body:string};
-  check(previous.name.includes('Superseded') && previous.body.includes('v0.3.0'), 'Misnumbered preview is not visibly superseded');
+  for (const endpoint of [
+    `repos/${repo}/releases/tags/v0.14.0`,
+    `repos/${repo}/git/ref/tags/v0.14.0`,
+    ...[698436689,698436688,698436701].map(id=>`repos/${repo}/releases/assets/${id}`),
+  ]) verifyGitHubAbsent(endpoint);
+  check(run('git',['ls-remote','origin','refs/tags/v0.14.0']).trim()==='', 'Deleted public tag still advertised');
   const prior=JSON.parse(run('gh',['api',`repos/${repo}/releases/tags/v0.2.0`])) as {draft:boolean};
   check(prior.draft===false,'Existing0.2.0 release must remain public');
-  console.log(JSON.stringify({ published: "passed", public: true, url: remote.html_url, defaultBranch: metadata.defaultBranchRef.name, digestsVerified: 3, productImages: images.length, previousPreview:'superseded', previousStable:'preserved' }));
+  console.log(JSON.stringify({ published: "passed", public: true, url: remote.html_url, defaultBranch: metadata.defaultBranchRef.name, digestsVerified: 3, productImages: images.length, previousPreview:'deleted', previousStable:'preserved' }));
 }

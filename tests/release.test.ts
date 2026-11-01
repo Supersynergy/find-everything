@@ -5,11 +5,23 @@ import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { requireGitHub404 } from "../scripts/release/github-absence";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const text = (path: string): string => readFileSync(join(root, path), "utf8");
 
 describe("release contract", () => {
+  test("deleted GitHub resources require a final HTTP 404, never an unrelated failure", () => {
+    assert.doesNotThrow(() => requireGitHub404(1, "HTTP/2.0 404 Not Found\r\n", "fixture"));
+    assert.doesNotThrow(() => requireGitHub404(1, "HTTP/1.1 301 Moved\r\n\r\nHTTP/2.0 404 Not Found\r\n", "fixture"));
+    for (const [code, headers] of [
+      [0, "HTTP/2.0 200 OK\n"], [0, "HTTP/2.0 404 Not Found\n"],
+      [1, "HTTP/2.0 401 Unauthorized\n"], [1, "HTTP/2.0 403 Forbidden\n"],
+      [1, "HTTP/2.0 429 Too Many Requests\n"], [1, "HTTP/2.0 500 Server Error\n"],
+      [1, "network unavailable"], [null, ""], [1, "HTTP/2.0 404 Not Found\nHTTP/2.0 200 OK\n"],
+    ] as const) assert.throws(() => requireGitHub404(code, headers, "fixture"), /Expected confirmed HTTP 404/);
+  });
+
   test("package, CLI and native bundle agree on the version", () => {
     const version: string = JSON.parse(text("package.json")).version;
     assert.equal(version, "0.3.0");

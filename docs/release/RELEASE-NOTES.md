@@ -6,7 +6,7 @@ Native macOS file search with saved local indexes, a CLI and optional Raycast in
 
 ## Changes
 
-- Correct the release sequence after 0.2.0: the intended version is **0.3.0**. The incorrectly numbered 0.14.0 preview is superseded, not a later product release.
+- Correct the release sequence after 0.2.0: the intended version is **0.3.0**. After verification of 0.3.0, the owner explicitly requested removal of the incorrectly numbered 0.14.0 release, downloads and public tag. The 0.3.0 downloads and 0.2.0 release are unchanged.
 - Automatically schedule an **All (/)** path index on the first application start, once dependencies are ready. Reuse an existing All snapshot. The once-only attempt marker prevents a canceled scan restarting on every launch; retry explicitly from the app.
 - Add a compact native footer with real file counts, a progress bar, Pause/Continue and Cancel. Scanning has no known total and shows no invented percentage; lookup preparation reports measured byte progress, capped below 100% until finalization.
 - Pause stops the owned worker group, including disk/CPU work. Paused time is excluded from its timeout. A separate guardian cleans up that group if its supervisor crashes while paused. Cancel during scanning keeps the previous snapshot; cancel during lookup preparation keeps the newly completed path snapshot and resumable derived preparation.
