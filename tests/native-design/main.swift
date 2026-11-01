@@ -1,0 +1,113 @@
+import Foundation
+let name="fe-design-test-\(UUID().uuidString)"
+let defaults=UserDefaults(suiteName:name)!
+precondition(SearchQueryOptions.setting("sort","big",in:"engine sort:name ext:ts")=="engine ext:ts sort:big")
+precondition(SearchQueryOptions.setting("type",nil,in:"type:audio duration:<1s")=="duration:<1s")
+precondition(SearchQueryOptions.setting("sort","name",in:"\"literal sort:big\" (kurze Sounds)")=="\"literal sort:big\" (kurze Sounds) sort:name")
+precondition(SearchQueryOptions.value("sort",in:"\"sort:big\" sort:name")=="name")
+let intent="(kurze düstere Lasersounds) name:\"alpha laser\" size:1m..10m modified:week sort:name-desc"
+precondition(SearchQueryOptions.replacingText("m",in:"old words in:\"/tmp/My Project\" ext:swift sort:name !generated")=="in:\"/tmp/My Project\" ext:swift sort:name !generated m")
+precondition(SearchQueryOptions.replacingText("新",in:"(kurze Lasersounds) favorites:true")=="favorites:true 新")
+precondition(ResultColumn.name.summary(in:intent)=="alpha laser")
+precondition(ResultColumn.name.direction(in:intent)=="arrow.down")
+precondition(ResultColumn.path.direction(in:intent)==nil)
+precondition(ResultColumn.name.nextSort(in:"")=="name")
+precondition(ResultColumn.name.nextSort(in:"sort:name")=="name-desc")
+precondition(ResultColumn.name.nextSort(in:"sort:name-desc")=="name")
+precondition(ResultColumn.type.nextSort(in:"")==nil)
+precondition(SearchQueryOptions.setting("dm","today",in:intent).contains("dm:today"))
+precondition(!SearchQueryOptions.setting("dm","today",in:intent).contains("modified:"))
+precondition(ResultColumn.allCases.reduce(intent){$1.clearing(in:$0)}=="(kurze düstere Lasersounds) sort:name-desc")
+let fragment="a \"laser\" (dark) \\ test"
+precondition(SearchQueryOptions.unquoted(SearchQueryOptions.quoted(fragment))==fragment)
+precondition(SearchQueryOptions.value("favorites",in:"is:favorite ext:wav")=="true")
+precondition(SearchQueryOptions.setting("favorites",nil,in:"is:favorite ext:wav")=="ext:wav")
+precondition(SearchQueryOptions.setting("type","audio",in:"is:favorite")=="is:favorite type:audio")
+precondition(ResultColumn.type.clearing(in:"is:favorite type:audio")=="is:favorite")
+precondition(ResultColumn.type.filters(in:"is:favorite").isEmpty)
+var searchOptions=SearchViewOptions.load(defaults)
+precondition(searchOptions.hideSystem && searchOptions.hideGenerated && searchOptions.hideHidden && searchOptions.hideNoise && searchOptions.refreshSeconds==5)
+precondition(searchOptions.effectiveQuery("laser")=="laser view:smart omit:system;generated;hidden;noise")
+precondition(searchOptions.effectiveQuery("laser",learning:false).hasSuffix("learn:off"))
+precondition(searchOptions.effectiveQuery("laser omit:noise")=="laser omit:noise view:smart")
+precondition(SearchQueryOptions.replacingText("report",in:"old learn:off")=="learn:off report")
+precondition(searchOptions.effectiveQuery("laser view:all")=="laser view:all")
+for key in [\SearchViewOptions.hideSystem,\SearchViewOptions.hideGenerated,\SearchViewOptions.hideHidden,\SearchViewOptions.hideNoise] {
+  var changed=searchOptions;changed[keyPath:key].toggle()
+  precondition(changed.needsSearchRefresh(comparedTo:searchOptions))
+  precondition(changed.effectiveQuery("") != searchOptions.effectiveQuery(""))
+}
+var appearanceOnly=searchOptions;appearanceOnly.keyboardHints.toggle();appearanceOnly.cacheMiB=16
+precondition(!appearanceOnly.needsSearchRefresh(comparedTo:searchOptions))
+searchOptions.refreshSeconds=10;searchOptions.persist(defaults);precondition(SearchViewOptions.load(defaults)==searchOptions)
+defaults.set(Data("{\"hideSystem\":false,\"initialResults\":900,\"refreshSeconds\":10}".utf8),forKey:SearchViewOptions.key)
+let migrated=SearchViewOptions.load(defaults)
+precondition(!migrated.hideSystem && migrated.cacheMiB==32 && migrated.refreshSeconds==10)
+precondition(migrated.keyboardHints)
+searchOptions.cacheMiB=16;searchOptions.persist(defaults);precondition(SearchViewOptions.load(defaults).cacheMiB==16)
+defer { defaults.removePersistentDomain(forName:name) }
+var prefs=DisplayPreferences.load(defaults)
+precondition(prefs.compact && prefs.appearance == "system")
+prefs.appearance="dark";prefs.fontSize=16;prefs.showSize=false;prefs.debounceMs=200
+prefs.persist(defaults)
+precondition(DisplayPreferences.load(defaults) == prefs)
+let raw=defaults.data(forKey:DisplayPreferences.key);prefs.persist(defaults);precondition(raw==defaults.data(forKey:DisplayPreferences.key))
+var invalid=prefs;invalid.fontSize=100;invalid.persist(defaults);precondition(DisplayPreferences.load(defaults) == DisplayPreferences())
+let saved=SavedSearch(id:UUID(),query:"(kurze düstere Lasersounds)",index:"sounds")
+SavedSearch.persist([saved],defaults);precondition(SavedSearch.load(defaults)==[saved])
+let unsafe=SavedSearch(id:UUID(),query:"test",index:"../../outside")
+SavedSearch.persist([unsafe],defaults);precondition(SavedSearch.load(defaults).isEmpty)
+func luminance(_ hex:String)->Double {
+  let v=Int(hex,radix:16)!
+  let channels: [Double] = [Double((v >> 16) & 255)/255.0,Double((v >> 8) & 255)/255.0,Double(v & 255)/255.0]
+  var rgb: [Double] = []
+  for channel in channels { rgb.append(channel <= 0.04045 ? channel/12.92 : pow((channel+0.055)/1.055,2.4)) }
+  return rgb[0]*0.2126+rgb[1]*0.7152+rgb[2]*0.0722
+}
+func contrast(_ a:String,_ b:String)->Double { let x=luminance(a),y=luminance(b);return(max(x,y)+0.05)/(min(x,y)+0.05) }
+for (name,p) in [("light",SearchPalette.light),("dark",SearchPalette.dark)] {
+  for (label,fg,bg) in [("name",p.ink,p.background),("path",p.secondary,p.background),("striped metadata",p.secondary,p.panel),("selected text","FFFFFF",p.accent),("footer",p.secondary,p.panel)] {
+    let ratio=contrast(fg,bg);precondition(ratio>=4.5,"\(name) \(label): \(ratio)");print("\(name) \(label): \(String(format:"%.2f",ratio)):1")
+  }
+}
+print("Presentation: preferences, validation, saved searches and text contrast passed")
+let narrowed=SearchQueryOptions.restricting("laser ext:wav favorites:true in:/old",to:"/Project Sounds (copy)")
+precondition(SearchQueryOptions.value("in",in:narrowed).map{SearchQueryOptions.unquoted($0)} == "/Project Sounds (copy)/")
+precondition(SearchQueryOptions.value("ext",in:narrowed)=="wav")
+precondition(SearchQueryOptions.value("favorites",in:narrowed)=="true")
+precondition(narrowed.hasPrefix("laser "))
+let rootQuery=SearchQueryOptions.restricting("(kurze düstere Lasersounds)",to:"/")
+precondition(SearchQueryOptions.unquoted(SearchQueryOptions.value("in",in:rootQuery))=="/")
+precondition(rootQuery.hasPrefix("(kurze düstere Lasersounds) "))
+precondition(SearchQueryOptions.tokens("  laser   ext:\"wave file\"  ").joined(separator:" ")=="laser ext:\"wave file\"")
+print("Folder narrowing: filter preservation, quoted names and root boundary pass")
+precondition(SearchQueryOptions.quoted("/Users/me/My Folder/")=="\"/Users/me/My Folder/\"")
+precondition(SearchQueryOptions.incompleteHint("(PDFs größer als 10 MB") != nil)
+precondition(SearchQueryOptions.incompleteHint("(PDFs größer als 10 MB)")==nil)
+precondition(SearchQueryOptions.incompleteHint("name:\"Q4 ") != nil)
+precondition(SearchQueryOptions.incompleteHint("\"folder (copy)\"")==nil)
+precondition(SearchQueryOptions.incompleteHint("(Dateien mit Namen \"report (copy)\")")==nil)
+print("Input composition: incomplete clauses wait; quoted parentheses remain literal")
+precondition(SearchQueryOptions.extensionFilter(" .MP3, wav;mp3\nFLAC ")=="mp3;wav;flac")
+precondition(SearchQueryOptions.extensionFilter("mp3, wav;tar.gz")=="mp3;wav;tar.gz")
+precondition(SearchQueryOptions.extensionFilter("mp3,../wav")==nil)
+precondition(SearchQueryOptions.extensionFilter(" ")==nil)
+precondition(SearchQueryOptions.extensionFilter((0...100).map{"ext\($0)"}.joined(separator:","))==nil)
+precondition(SearchQueryOptions.extensionFilter((0..<40).map{String(repeating:"a",count:60)+"\($0)"}.joined(separator:","))==nil)
+let recentBatch=OpenRecents.updating(["old":0],adding:(0..<1000).map{"/files/\($0).mp3"},at:1)
+precondition(recentBatch.count==150 && recentBatch["old"]==nil && recentBatch.values.allSatisfy{$0==1})
+var opening=OpeningPreferences()
+precondition(opening.set(application:"/Applications/VLC.app",for:" .MP3 "))
+precondition(opening.application(for:"mp3")=="/Applications/VLC.app")
+precondition(opening.application(forFileName:"Track.MP3")=="/Applications/VLC.app")
+precondition(opening.set(application:"/Applications/Archive.app",for:"tar.gz"))
+precondition(opening.set(application:"/Applications/Gzip.app",for:"gz"))
+precondition(opening.application(forFileName:"backup.tar.gz")=="/Applications/Archive.app")
+precondition(!opening.set(application:"relative.app",for:"wav"))
+precondition(!opening.set(application:"/Applications/VLC.app/Contents",for:"wav"))
+precondition(!opening.set(application:"/Applications/VLC.app",for:"../wav"))
+opening.persist(defaults)
+precondition(OpeningPreferences.load(defaults)==opening)
+precondition(opening.set(application:nil,for:"mp3"))
+precondition(opening.application(for:"MP3")==nil)
+print("Opening preferences and multi-extension filter: validation and persistence pass")

@@ -12,18 +12,13 @@ import { useEffect, useRef, useState } from "react";
 import { execFile, ChildProcess } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
-import {
-  Scope,
-  EngineOpts,
-  ensureIndex,
-  runSearch,
-  rerank,
-  applyPostFilters,
-  parseQuery,
-  humanBytes,
-  prettyPath,
-  scopePaths,
-} from "./engine";
+import type { Scope, EngineOpts } from "./engine";
+import { IndexProfile, profiles,defaultIndex,BUILTIN_SCOPES as SCOPES } from "./catalog";
+import {withSmartView,withAllView} from './search-ranking';
+import {humanBytes,prettyPath} from './file-display';
+import * as os from 'node:os';
+const HOME=os.homedir();
+const customPaths=(prefs:EngineOpts)=>(prefs.customSearchPaths||'').split(',').map(p=>p.trim()).filter(Boolean);
 
 interface Prefs extends EngineOpts {
   resultLimit: string;
@@ -53,47 +48,33 @@ const isImage = (p: string) =>
 
 export default function Command() {
   const prefs = getPreferenceValues<Prefs>();
-  const [scope, setScope] = useState<Scope>("home");
+  const [scope, setScope] = useState<Scope>(()=>defaultIndex());
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<string[]>([]);
-  const [indexing, setIndexing] = useState(true);
+  const [indexing, setIndexing] = useState(false);
   const [searching, setSearching] = useState(false);
   const [meta, setMeta] = useState<Record<string, Meta>>({});
   const [showDetail, setShowDetail] = useState(false);
   const [tick, setTick] = useState(0);
+  const [savedIndexes, setSavedIndexes] = useState<IndexProfile[]>([]);
+  const engineOpts: EngineOpts = SCOPES.includes(scope) ? prefs : {};
+  useEffect(() => {
+    try { setSavedIndexes(profiles()); }
+    catch (e) { showToast({ style: Toast.Style.Failure, title: "Could not load saved indexes", message: e.message }); }
+  }, [tick]);
   const procRef = useRef<ChildProcess[]>([]);
+  const indexProcRef=useRef<ChildProcess|undefined>(undefined);
+  useEffect(()=>()=>{indexProcRef.current?.kill('SIGTERM');},[]);
   const seq = useRef(0);
+  const warnedScopes=useRef(new Set<string>());
   const limit = Math.max(
     10,
     parseInt(prefs.resultLimit || "300", 10) || 300,
   );
 
   useEffect(() => {
-    let alive = true;
-    setIndexing(true);
-    ensureIndex(scope, prefs)
-      .then(() => {
-        if (alive) setIndexing(false);
-      })
-      .catch((e) => {
-        if (alive) {
-          setIndexing(false);
-          showToast({
-            style: Toast.Style.Failure,
-            title: "Index build failed",
-            message: String(e?.message || e),
-          });
-        }
-      });
-    return () => {
-      alive = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scope]);
-
-  useEffect(() => {
-    const q = query.trim();
-    if (indexing || q.length < 2) {
+    const q = withSmartView(query.trim());
+    if (indexing) {
       setResults([]);
       setSearching(false);
       return;
@@ -102,14 +83,28 @@ export default function Command() {
       const mySeq = ++seq.current;
       setSearching(true);
       for (const p of procRef.current) p.kill("SIGKILL");
-      const out = await runSearch(q, scope, limit, (c) => {
-        procRef.current = c;
-      });
-      if (mySeq !== seq.current) return;
-      setResults(applyPostFilters(rerank(out, q), parseQuery(q)));
-      setSearching(false);
+      try {
+        const cli = path.join(HOME, ".local/bin/fe");
+        if (!fs.existsSync(cli)) throw new Error("Install Find Everything with install.sh --local for indexed searches");
+        if(scope==='custom'&&!customPaths(engineOpts).length)throw new Error('Set Custom Search Paths first');
+        const roots = scope === "custom" ? customPaths(engineOpts).flatMap(p => ["--path", p]) : ["--index", scope];
+        const settings = SCOPES.includes(scope) ? [engineOpts.includeHidden === false ? "--no-hidden" : "--hidden", engineOpts.includeIgnored ? "--include-ignored" : "--respect-ignore", ...(engineOpts.extraExcludes ? ["--exclude", engineOpts.extraExcludes] : [])] : [];
+        const out = await new Promise<string>((resolve, reject) => {
+          // Above the service's own 12-second search deadline: a cold first run after a
+          // restart must answer or report its own error instead of a bare kill.
+          const child = execFile(cli, ["search", "--json", "--snapshot", ...roots, ...settings, "-n", String(Math.min(1000, limit)), "--", q], { timeout: 30000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => error ? reject(error) : resolve(stdout));
+          procRef.current = [child];
+        });
+        if (mySeq !== seq.current) return;
+        const reply = JSON.parse(out);
+        if(reply.properties?.length)setMeta(previous=>({...previous,...Object.fromEntries(reply.properties.filter((r:any)=>Number.isFinite(r.size)&&Number.isFinite(r.mtime)&&r.dir>=0).map((r:any)=>[r.path,{size:r.size,mtime:new Date(r.mtime),dir:r.dir===1}]))}));
+        setResults(reply.paths);
+        if (reply.complete===false && reply.warnings?.length && !warnedScopes.current.has(scope)) {warnedScopes.current.add(scope);showToast({ style: Toast.Style.Failure, title: "Snapshot coverage", message: "Some coverage is incomplete. Details are available in the app settings." });}
+      } catch (e) {
+        if (mySeq === seq.current) showToast({ style: Toast.Style.Failure, title: "Search failed", message: e.message });
+      } finally { if (mySeq === seq.current) setSearching(false); }
     }, 120);
-    return () => clearTimeout(timer);
+    return () => { clearTimeout(timer); seq.current++; for (const child of procRef.current) child.kill("SIGKILL"); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query, scope, indexing, tick]);
 
@@ -139,8 +134,13 @@ export default function Command() {
   }, [results]);
 
   const refresh = () => {
+    if(indexProcRef.current?.exitCode===null)return;
+    if(scope==='custom'&&!customPaths(engineOpts).length){showToast({style:Toast.Style.Failure,title:'Set Custom Search Paths first'});return;}
     setIndexing(true);
-    ensureIndex(scope, prefs, true)
+    const cli=path.join(HOME,'.local/bin/fe');
+    const roots=scope==='custom'?customPaths(engineOpts).flatMap(p=>['--path',p]):['--index',scope];
+    const settings=SCOPES.includes(scope)?[engineOpts.includeHidden===false?'--no-hidden':'--hidden',engineOpts.includeIgnored?'--include-ignored':'--respect-ignore',...(engineOpts.extraExcludes?['--exclude',engineOpts.extraExcludes]:[])]:[];
+    new Promise<void>((resolve,reject)=>{indexProcRef.current=execFile(cli,['index',...roots,...settings],{timeout:130000,maxBuffer:1024*1024},error=>error?reject(error):resolve());})
       .then(() => {
         setIndexing(false);
         setTick((t) => t + 1); // retrigger search effect
@@ -158,31 +158,28 @@ export default function Command() {
 
   const emptyTitle = indexing
     ? "Building index…"
-    : query.trim().length < 2
-      ? "Type to fuzzy-search files"
       : searching
         ? "Searching…"
         : "No matches";
 
   const customEmpty =
-    scope === "custom" && scopePaths("custom", prefs).length === 0;
+    scope === "custom" && customPaths(prefs).length === 0;
   const emptyDesc = indexing
     ? `Building your personal index — first run only.`
     : customEmpty
       ? "Set 'Custom Search Paths' in the command preferences first."
-      : query.trim().length < 2
-        ? "Every file on your Mac. No Spotlight needed."
-        : "Nothing found — try a shorter term or ⌘R to refresh.";
+      : "Search an indexed folder or project. ⌘R explicitly rebuilds it.";
 
   return (
     <List
-      isLoading={indexing}
+      isLoading={indexing || searching}
       throttle
+      filtering={false}
       isShowingDetail={showDetail}
       searchText={query}
       onSearchTextChange={setQuery}
       navigationTitle="Find Everything"
-      searchBarPlaceholder="Find every file on your Mac — instantly…"
+      searchBarPlaceholder="Documents & media first · ext:json for data · view:all for everything"
       searchBarAccessory={
         <List.Dropdown
           tooltip="Search scope"
@@ -216,6 +213,7 @@ export default function Command() {
             value="custom"
             icon={Icon.Folder}
           />
+          {savedIndexes.map(index => <List.Dropdown.Item key={index.name} title={index.name} value={index.name} icon={Icon.Folder} />)}
         </List.Dropdown>
       }
     >
@@ -277,7 +275,10 @@ export default function Command() {
             actions={
               <ActionPanel>
                 <ActionPanel.Section>
-                  <Action.Open title="Open" target={p} />
+                  <Action.Open title="Open" target={p} onOpen={()=>{
+                    if(!query.trim())return;
+                    execFile(path.join(HOME,'.local/bin/fe'),['learn','open',p,'--query',query,'--index',scope],{timeout:3000},error=>{if(error)void showToast({style:Toast.Style.Failure,title:'Local learning failed',message:error.message});});
+                  }} />
                   <Action.ShowInFinder path={p} />
                   <Action
                     title="Open in Terminal"
@@ -311,6 +312,12 @@ export default function Command() {
                   />
                 </ActionPanel.Section>
                 <ActionPanel.Section>
+                  <Action title="Show All Indexed Files" icon={Icon.Eye} onAction={()=>setQuery(withAllView(query))} />
+                  <ActionPanel.Submenu title="Local Search Learning">
+                    {['enable','disable','reset'].map(action=><Action key={action} title={action==='reset'?'Reset Learned Preferences':action==='enable'?'Enable Learning':'Disable Learning'} onAction={()=>{
+                      execFile(path.join(HOME,'.local/bin/fe'),['learn',action],{timeout:3000},error=>{void showToast({style:error?Toast.Style.Failure:Toast.Style.Success,title:error?'Learning Update Failed':'Learning Updated',message:error?.message||action});setTick(t=>t+1);});
+                    }} />)}
+                  </ActionPanel.Submenu>
                   <Action
                     title="Toggle Preview"
                     icon={Icon.AppWindowSidebarRight}

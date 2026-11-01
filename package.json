@@ -1,6 +1,7 @@
 {
   "$schema": "https://www.raycast.com/schemas/extension.json",
   "name": "find-everything",
+  "version": "0.14.0",
   "title": "Find Everything",
   "description": "Instant Spotlight-free file search: persistent fd index, rg filter, fzf ranking. Finds more than Spotlight ever did.",
   "icon": "icon.png",
@@ -58,7 +59,7 @@
           "name": "indexMaxAgeMinutes",
           "title": "Index Max Age (min)",
           "type": "textfield",
-          "description": "Index older than this is rebuilt in the background on open.",
+          "description": "Age warning threshold; rebuilding remains explicit.",
           "default": "60",
           "required": false
         },
@@ -74,18 +75,23 @@
     }
   ],
   "dependencies": {
-    "@raycast/api": "^1.102.3"
+    "@raycast/api": "^2.8.2"
   },
   "devDependencies": {
-    "@types/node": "22.13.10",
-    "@types/react": "19.0.10",
-    "typescript": "^5.8.2"
+    "@types/node": "26.6.5",
+    "@types/react": "19.3.0",
+    "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "esbuild": "0.28.1"
   },
   "scripts": {
     "build": "ray build",
     "dev": "ray develop",
     "cli": "bun run src/cli.ts",
-    "build-cli": "bun build --compile ./src/cli.ts --outfile dist-bin/fe"
+    "build-cli": "bun build --compile ./src/cli.ts --outfile dist-bin/fe",
+    "test": "bun test tests",
+    "check": "bun test tests && tsc --noEmit"
   },
   "platforms": [
     "macOS"

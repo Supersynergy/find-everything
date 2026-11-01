@@ -5,14 +5,22 @@ cd "$(dirname "$0")"
 
 APP="Find Everything.app"
 rm -rf "$APP"
-swift build -c release 2>&1 | tail -3
+(cd .. && bun run build-cli)
+swift build -c release --jobs 2 2>&1 | tail -3
 
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Helpers"
 cp .build/release/FindEverything "$APP/Contents/MacOS/FindEverything"
+cp ../dist-bin/fe "$APP/Contents/Helpers/fe"
+mkdir -p "$APP/Contents/Resources/Licenses"
+cp ../LICENSE ../THIRD-PARTY-NOTICES.md ../docs/release/BUN-LICENSE.md "$APP/Contents/Resources/Licenses/"
+swiftc -O MediaProbe.swift -o "$APP/Contents/Helpers/fe-media-probe"
+swiftc -O FileEvents.swift -o "$APP/Contents/Helpers/fe-events"
 
 # icon.icns from the repo PNG via iconset + iconutil
-ICONSET=/tmp/fe-icon.iconset
-rm -rf "$ICONSET" && mkdir -p "$ICONSET"
+ICONWORK=$(mktemp -d)
+trap 'rm -rf "$ICONWORK"' EXIT
+ICONSET="$ICONWORK/fe.iconset"
+mkdir -p "$ICONSET"
 SRC=../assets/icon.png
 for s in 16 32 128 256 512; do
   sips -z $s $s "$SRC" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
@@ -30,11 +38,11 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>com.supersynergy.findeverything</string>
   <key>CFBundleExecutable</key><string>FindEverything</string>
   <key>CFBundleIconFile</key><string>icon</string>
-  <key>CFBundleVersion</key><string>0.2.0</string>
-  <key>CFBundleShortVersionString</key><string>0.2.0</string>
+  <key>CFBundleVersion</key><string>0.14.0</string>
+  <key>CFBundleShortVersionString</key><string>0.14.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSUIElement</key><true/>
-  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSMinimumSystemVersion</key><string>15.0</string>
 </dict>
 </plist>
 PLIST

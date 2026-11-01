@@ -1,8 +1,8 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "commonjs",
-    "lib": ["ES2020", "DOM"],
+    "target": "ES2022",
+    "module": "nodenext",
+    "lib": ["ES2022", "DOM"],
     "jsx": "react-jsx",
     "strict": false,
     "esModuleInterop": true,
@@ -10,7 +10,8 @@
     "noErrorTruncation": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "moduleResolution": "node",
+    "types": ["node", "react"],
+    "moduleResolution": "nodenext",
     "ignoreDeprecations": "5.0",
     "allowSyntheticDefaultImports": true,
     "declaration": false,

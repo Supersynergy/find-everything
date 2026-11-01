@@ -2,6 +2,8 @@ import SwiftUI
 import AppKit
 import Carbon
 import Foundation
+import Darwin
+import UniformTypeIdentifiers
 
 // MARK: - Paths & tool discovery
 
@@ -12,7 +14,7 @@ enum FEDirs {
 }
 
 func toolPath(_ name: String) -> String? {
-  let candidates = [
+  let candidates = (name == "fe" ? [Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/fe").path, NSHomeDirectory() + "/.local/bin/fe"] : []) + [
     FEDirs.binDir.appendingPathComponent(name).path,
     "/opt/homebrew/bin/\(name)",
     "/usr/local/bin/\(name)",
@@ -25,8 +27,19 @@ func toolPath(_ name: String) -> String? {
 
 // MARK: - Search model
 
-enum FEScope: String, CaseIterable, Identifiable {
-  case home, downloads, documents, applications, all, custom
+struct FEScope: RawRepresentable, Hashable, Identifiable {
+  let rawValue: String
+  init?(rawValue: String) {
+    guard rawValue.range(of: "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", options: .regularExpression) != nil else { return nil }
+    self.rawValue = rawValue
+  }
+  static let home = FEScope(rawValue: "home")!
+  static let downloads = FEScope(rawValue: "downloads")!
+  static let documents = FEScope(rawValue: "documents")!
+  static let applications = FEScope(rawValue: "applications")!
+  static let all = FEScope(rawValue: "all")!
+  static let custom = FEScope(rawValue: "custom")!
+  static let allCases: [FEScope] = [.home, .downloads, .documents, .applications, .all, .custom]
   var id: String { rawValue }
   var label: String {
     switch self {
@@ -36,13 +49,19 @@ enum FEScope: String, CaseIterable, Identifiable {
     case .applications: "Applications"
     case .all: "All (/)"
     case .custom: "Custom"
+    case _ where rawValue == "everything": "All indexed files"
+    default: rawValue
     }
   }
 }
 
 struct FEItem: Identifiable, Hashable {
   let path: String
+  var indexedSize: Double? = nil
+  var indexedMtime: Double? = nil
+  var indexedDirectory: Bool? = nil
   var id: String { path }
+  var url:URL {URL(fileURLWithPath:path)}
   var name: String { (path as NSString).lastPathComponent }
   var dir: String {
     let d = (path as NSString).deletingLastPathComponent
@@ -57,20 +76,180 @@ struct FEItem: Identifiable, Hashable {
 
 @MainActor
 final class Model: ObservableObject {
+  @Published var display = DisplayPreferences.load() { didSet { if display != oldValue { display.persist() } } }
+  @Published var viewOptions=SearchViewOptions.load() {didSet {
+    guard viewOptions != oldValue else {return};viewOptions.persist()
+    resultCache.budget=resultBudget
+    if viewOptions.needsSearchRefresh(comparedTo:oldValue) {onQueryChange(query)}
+  }}
+  @Published var openingPreferences=OpeningPreferences.load() {didSet {if openingPreferences != oldValue {openingPreferences.persist()}}}
+  @Published var savedSearches = SavedSearch.load()
   @Published var query = ""
   @Published var items: [FEItem] = []
+  @Published private(set) var virtualRevision = 0
+  @Published private(set) var resultIdentity = 0
+  private var resultCache = VirtualResults<FEItem>()
+  private var wantedResults = 0..<0
+  private var resultTask: Task<Void, Never>?
+  private struct QueryView {let items:[FEItem];let total:Int?;let snapshot:String?;let ms:Int;let bytes:Int}
+  private var queryViews:[String:QueryView]=[:]
+  private var queryOrder:[String]=[]
+  private var displayedQuery=""
+  private var startupView:WarmResults?
+  @Published private(set) var showingStartupCache=false
+  private var viewKey:String {scope.rawValue+"\n"+SearchQueryOptions.tokens(viewOptions.effectiveQuery(query,learning:display.habitRanking)).joined(separator:" ")}
+  private var requestGate=SearchRequestGate()
+  private var resultBudget:Int {viewOptions.cacheMiB*1024*1024-queryViews.values.reduce(0){$0+$1.bytes}}
+  private var startupFile:URL {FEDirs.support.appendingPathComponent("startup-view.json")}
+  var resultCount: Int { totalMatches ?? items.count }
+  var canInteractWithResults:Bool {displayedQuery==viewKey && !searching && !indexing && resultCount>0}
+  func cachedResult(at row: Int) -> FEItem? { resultCache.value(at: row) }
   @Published var recents: [FEItem] = []
-  @Published var selected = 0
+  @Published var selected = 0 {didSet {if selectedRows.count<=1 {selectionDidChange?()}}}
+  @Published private(set) var selectedRows = IndexSet(integer:0)
+  @Published private(set) var selectionNeedsConfirmation=false
+  private var selectionAnchor = 0
+  private var selectionWasExplicit=false
+  private var deferredSelectionRefresh=false
+  private static let selectionRefreshMessage="Results changed; updates are paused while multiple files are selected."
+  @Published var inputFocus:ResultInputFocus = .search
+  var resultFocused:Bool {inputFocus == .results}
+  var focusSearchField:((Bool)->Void)?
+  var focusResultsField:(()->Void)?
+  private var pendingQuickAction:(row:Int,generation:Int,action:SelectedQuickAction)?
+  private var pendingEnd=false
+  private var pendingEndAction:SelectedQuickAction?
+  func focusSearch(selectAll:Bool=false) {inputFocus = .search;focusSearchField?(selectAll)}
+  func focusResults() {inputFocus = .results;focusResultsField?()}
+  @Published var keyboardSelection = 0
+  @Published var windowMode = UserDefaults.standard.bool(forKey: "windowMode")
+  @Published var showDockIcon = UserDefaults.standard.object(forKey:"showDockIcon") as? Bool ?? true
+  @Published var showOptions = false
+  @Published var columnFilter:ResultColumn?
+  @Published var showSortBar=false
+  @Published var editingColumnFilter=false
+  @Published var autoUpdate = UserDefaults.standard.object(forKey: "autoUpdate") as? Bool ?? true
+  @Published var liveNote = "Checking automatic updates…"
+  @Published var liveProblem: String?
+  private var liveRevision: String?
+  private var checkingLive = false
+  private var refreshing=false
+  private var lastLivePoll=Date.distantPast
+  var updateLiveService: (() -> Void)?
+  @Published var searchNote = ""
+  @Published private(set) var inputHint:String?
+  @Published private(set) var unknownProperties=0
+  @Published var totalMatches: Int?
+  @Published private(set) var resultIsProvisional=false
+  @Published var windowStart = 0
+  private var resultSnapshot: String?
+  private var resultIsSemantic = false
+  private var resultHasExplicitSort = false
+  private(set) var interactionEvents: [[String: Any]] = []
+  var toggleWindowMode: (() -> Void)?
+  var updateDockVisibility: (() -> Void)?
+  var showQuickPreview:((String)->Void)?
+  var showQuickPreviews:(([String])->Void)?
+  var selectionDidChange:(()->Void)?
+  #if FE_NATIVE_TESTS
+  var testWebAction:((String)->Void)?
+  var testTrashAction:((String)->Void)?
+  var testRunTool:(([String]) async throws -> String)?
+  #endif
+  var ensureSearchService: (() -> Void)?
+
+  func select(_ index: Int, trigger: SelectionTrigger) {
+    guard ResultNavigation.canEnterResults(count:resultCount,queryPending:searching) else {return}
+    focusResults();selectionNeedsConfirmation=false;selectionWasExplicit=true
+    pendingEnd=false;pendingEndAction=nil
+    let result = ResultNavigation.select(index, count: resultCount, trigger: trigger)
+    if selected != result.index {pendingQuickAction=nil}
+    selectionAnchor=result.index
+    selectedRows=resultCount>0 ? IndexSet(integer:result.index) : IndexSet()
+    selected = result.index
+    if result.scroll { keyboardSelection += 1 }
+    if resultCount > 0 { requestResults(selected..<(selected+1)) }
+    recordInteraction("nav", trigger: trigger == .keyboard ? "keyboard" : "click")
+    resumeDeferredSelectionRefresh()
+  }
+  func beginMouseSelection(_ row:Int) -> Bool {
+    guard canInteractWithResults else {return false}
+    selectionWasExplicit=true
+    if selectionNeedsConfirmation {selectRows(IndexSet(integer:row),lead:row)} else {focusResults()}
+    return true
+  }
+  func selectRows(_ rows:IndexSet,lead:Int) {
+    guard canInteractWithResults else {return}
+    let valid=ResultSelection.bounded(rows,count:resultCount)
+    guard !valid.isEmpty else {return}
+    focusResults();selectionNeedsConfirmation=false;selectionWasExplicit=true;pendingEnd=false;pendingEndAction=nil;pendingQuickAction=nil
+    selectedRows=valid
+    selected=valid.contains(lead) ? lead : (valid.last ?? 0)
+    selectionAnchor=selected
+    requestResults(selected..<(selected+1))
+    recordInteraction("nav",trigger:"click")
+    resumeDeferredSelectionRefresh()
+  }
+  func extendSelection(_ direction:Int) {
+    guard resultCount>0 else {return}
+    selectionNeedsConfirmation=false;selectionWasExplicit=true
+    let next=max(0,min(selected+direction,resultCount-1))
+    selectedRows=ResultSelection.range(anchor:selectionAnchor,through:next,count:resultCount)
+    selected=next;keyboardSelection += 1
+    requestResults(next..<(next+1))
+    resumeDeferredSelectionRefresh()
+  }
+  func performSelected(_ action:SelectedQuickAction) {
+    guard !selectionNeedsConfirmation else {actionFailure("Results changed; select a file again");return}
+    selectionWasExplicit=true
+    if selectedRows.count>1 && (action == .open || action == .preview) {
+      withSelectedItems {items in
+        if action == .open {self.openItems(items)}
+        else {self.showQuickPreviews?(items.map(\.path))}
+      }
+      return
+    }
+    if pendingEnd {pendingEndAction = pendingEndAction == action && action == .preview ? nil : action;return}
+    if resultCount==0,!searching,displayedQuery==viewKey {return}
+    if let item=currentItem {pendingQuickAction=nil;runSelected(action,item);return}
+    let row=displayedQuery==viewKey ? selected : 0
+    if action == .preview,pendingQuickAction?.row==row,pendingQuickAction?.action == .preview {pendingQuickAction=nil;return}
+    pendingQuickAction=(row,searchGeneration,action)
+    if resultCount>0 {requestResults(row..<(row+1))}
+  }
+  private func runSelected(_ action:SelectedQuickAction,_ item:FEItem) {
+    switch action {case .preview:quickLook(item.path);case .open:open(item.path);case .folder:searchInFolder(item.path)}
+  }
+  private func flushQuickAction() {
+    guard let pending=pendingQuickAction,pending.generation==searchGeneration,pending.row==selected,let item=currentItem else {return}
+    pendingQuickAction=nil;runSelected(pending.action,item)
+  }
+
+  func recordInteraction(_ event: String, trigger: String) {
+    interactionEvents.append(["event": event, "trigger": trigger, "ts": Date().timeIntervalSince1970])
+    if interactionEvents.count > 128 { interactionEvents.removeFirst(interactionEvents.count - 128) }
+  }
   @Published var showActions = false
   @Published var scope: FEScope = FEScope(
     rawValue: UserDefaults.standard.string(forKey: "scope") ?? "home"
   ) ?? .home
   @Published var searching = false
   @Published var indexing = false
-  @Published var showDetail = false
+  @Published var indexingStatus = "Building index…"
+  private var enrichmentTask: Task<Void, Never>?
+  private var indexProc: Process?
+  @Published var showDetail = UserDefaults.standard.bool(forKey:"showDetail") { didSet { UserDefaults.standard.set(showDetail,forKey:"showDetail") } }
   @Published var setupNeeded = false
   @Published var setupLog = "Checking tools…"
   @Published var setupRunning = false
+  @Published var savedScopes: [FEScope] = []
+  @Published var indexSummaries: [String: String] = [:]
+  private var indexedScopes: Set<FEScope>?
+  var needsIndex: Bool { indexedScopes.map { !$0.contains(scope) } ?? false }
+  @Published var errorMessage: String?
+  @Published var actionError: String?
+  @Published var shortcutWarning: String?
+  var availableScopes: [FEScope] { FEScope.allCases + savedScopes }
   @Published var actSel = 0
   @Published var actMenu: ActMenu = .root
   @Published var actFilter = ""
@@ -92,8 +271,10 @@ final class Model: ObservableObject {
 
   var fePath: String? { toolPath("fe") }
   private var searchTask: Task<Void, Never>?
-  private var proc: Process?
-  private var metaCache: [String: [FileAttributeKey: Any]] = [:]
+  private var foregroundFetch:Task<SearchReply,Error>?
+  private var foregroundID=UUID()
+  private var searchGeneration = 0
+  private var metaCache: [String: (at: Date, attrs: [FileAttributeKey: Any])] = [:]
 
   // User habits live in a JSON file under Application Support — app data,
   // not a preference. Works regardless of how the binary was launched and
@@ -102,7 +283,8 @@ final class Model: ObservableObject {
     FEDirs.support.appendingPathComponent("opens.json")
   }
   static var pinsFile: URL {
-    FEDirs.support.appendingPathComponent("pins.json")
+    if let file=ProcessInfo.processInfo.environment["FE_FAVORITES_FILE"] {return URL(fileURLWithPath:file)}
+    return FEDirs.support.appendingPathComponent("pins.json")
   }
   static var historyFile: URL {
     FEDirs.support.appendingPathComponent("history.json")
@@ -118,7 +300,7 @@ final class Model: ObservableObject {
   }
   func recordQuery(_ q: String) {
     let t = q.trimmingCharacters(in: .whitespaces)
-    guard t.count >= 2 else { return }
+    guard display.rememberHistory, t.count >= 2 else { return }
     history.removeAll { $0 == t }
     history.insert(t, at: 0)
     if history.count > 30 { history = Array(history.prefix(30)) }
@@ -147,31 +329,60 @@ final class Model: ObservableObject {
     onQueryChange(query)
     return true
   }
+  /// Last query removed by Esc / ⌘⌫ / the cancel button — ⌘Z puts it back.
+  private(set) var lastClearedQuery = ""
+  /// Clears the line, keeps the caret in the field and remembers the text
+  /// so an accidental clear is one ⌘Z away from coming back.
+  func clearQuery() {
+    guard !query.isEmpty else { focusSearch(); return }
+    lastClearedQuery = query
+    query = ""
+    histPos = -1
+    onQueryChange("")
+    focusSearch()
+  }
+  @discardableResult func restoreClearedQuery() -> Bool {
+    guard query.isEmpty, !lastClearedQuery.isEmpty else { return false }
+    query = lastClearedQuery
+    lastClearedQuery = ""
+    onQueryChange(query)
+    focusSearch()
+    return true
+  }
   /// Pinned items float above recents and are boosted over other results.
   @Published private(set) var pinnedPaths: [String] = []
+  private var pinsStamp:String?
   var pinnedSet: Set<String> { Set(pinnedPaths) }
   @Published var lastMs = 0
   @Published var showHelp = false
 
-  func loadPins() {
-    pinnedPaths = (try? JSONDecoder().decode(
-      [String].self,
-      from: Data(contentsOf: Model.pinsFile))) ?? []
+  @discardableResult func loadPins() -> Bool {
+    let attrs=try? FileManager.default.attributesOfItem(atPath:Model.pinsFile.path)
+    let modified=(attrs?[.modificationDate] as? Date)?.timeIntervalSinceReferenceDate ?? 0
+    let stamp="\(modified):\(attrs?[.size] ?? 0):\(attrs?[.systemFileNumber] ?? 0)"
+    guard stamp != pinsStamp else {return false};pinsStamp=stamp
+    let values:[String]
+    if attrs == nil {values=[]}
+    else {
+      guard let size=attrs?[.size] as? NSNumber,size.intValue<=2*1024*1024,
+        let data=try? Data(contentsOf:Model.pinsFile),let decoded=try? JSONDecoder().decode([String].self,from:data),decoded.count<=10000 else {return false}
+      values=decoded
+    }
+    guard pinnedPaths != values else {return false};pinnedPaths=values;return true
   }
 
   func togglePin(_ p: String) {
-    if let i = pinnedPaths.firstIndex(of: p) {
-      pinnedPaths.remove(at: i); showToast("Unpinned")
-    } else {
-      pinnedPaths.insert(p, at: 0); showToast("Pinned to top")
+    let remove=pinnedSet.contains(p)
+    Task {
+      do {
+        let output=try await runTool(["favorites",remove ? "remove" : "add","--json","--",p])
+        struct Reply:Decodable {let paths:[String]}
+        pinnedPaths=try JSONDecoder().decode(Reply.self,from:Data(output.utf8)).paths
+        showToast(remove ? "Removed from favorites" : "Added to favorites")
+        loadRecents()
+        onQueryChange(query,preserveSelection:true)
+      }catch {showToast("Favorite could not be saved: \(error.localizedDescription)")}
     }
-    if let d = try? JSONEncoder().encode(pinnedPaths) {
-      try? FileManager.default.createDirectory(
-        at: FEDirs.support, withIntermediateDirectories: true)
-      try? d.write(to: Model.pinsFile, options: .atomic)
-    }
-    loadRecents()
-    items = habitBoost(items)
   }
   private var opens: [String: Double] {
     guard let data = try? Data(contentsOf: Model.opensFile),
@@ -181,14 +392,9 @@ final class Model: ObservableObject {
     return d
   }
 
-  func recordOpen(_ p: String) {
-    var d = opens
-    d[p] = Date().timeIntervalSince1970
-    if d.count > 150 {
-      let cutoff = d.values.sorted()[d.count - 150]
-      d = d.filter { $0.value >= cutoff }
-    }
-    saveOpens(d)
+  func recordOpen(_ p: String) {recordOpened([p])}
+  private func recordOpened(_ paths:[String]) {
+    saveOpens(OpenRecents.updating(opens,adding:paths,at:Date().timeIntervalSince1970))
   }
 
   private func saveOpens(_ d: [String: Double]) {
@@ -225,13 +431,16 @@ final class Model: ObservableObject {
   }
   /// Section header to render above row i (nil = none).
   func headerBefore(_ i: Int) -> String? {
+    guard hasResultGroups else { return nil }
     let l = visibleItems
     guard i < l.count else { return nil }
     let t = tier(l[i])
     if i == 0 || tier(l[i - 1]) != t { return Model.tierTitles[t] }
     return nil
   }
+  var hasResultGroups:Bool {display.groupResults && display.habitRanking && !resultIsSemantic && !resultHasExplicitSort && !query.trimmingCharacters(in:.whitespaces).isEmpty}
   func habitBoost(_ list: [FEItem]) -> [FEItem] {
+    guard display.habitRanking else { return list }
     let d = opens
     var tiers: [[FEItem]] = [[], [], [], []]
     for it in list { tiers[tier(it)].append(it) }
@@ -244,18 +453,31 @@ final class Model: ObservableObject {
   }
 
   func meta(for p: String) -> [FileAttributeKey: Any]? {
-    if let m = metaCache[p] { return m }
+    if let m = metaCache[p], -m.at.timeIntervalSinceNow < 300 { return m.attrs }
     let attrs = try? FileManager.default.attributesOfItem(atPath: p)
-    if let attrs { metaCache[p] = attrs }
+    if let attrs {
+      if metaCache.count >= 1024 { metaCache.removeAll(keepingCapacity: true) }
+      metaCache[p] = (Date(), attrs)
+    }
     return attrs
   }
 
   func bootstrap() {
+    // DisplayPreferences already defaults new installs to instant search; keep saved choices.
+    if !UserDefaults.standard.bool(forKey:"instantSearch.v1") {UserDefaults.standard.set(true,forKey:"instantSearch.v1")}
+    if let saved=WarmResults.load(startupFile,scope:scope.rawValue,query:viewOptions.effectiveQuery("",learning:display.habitRanking)) {
+      startupView=saved;showingStartupCache=true
+      items=saved.entries.map{FEItem(path:$0.path,indexedSize:$0.size,indexedMtime:$0.mtime,indexedDirectory:$0.directory)}
+      totalMatches=saved.total;displayedQuery=viewKey
+      resultCache.insert(items,at:0,cost:items.reduce(0){$0+$1.path.utf8.count*2+256})
+      virtualRevision += 1
+    }
     loadPins()
     loadHistory()
     loadRecents()
     let missing = ["fe", "fd", "rg", "fzf"].filter { toolPath($0) == nil }
     if missing.isEmpty {
+      setupNeeded = false
       ensureIndexIfNeeded()
     } else {
       setupNeeded = true
@@ -264,16 +486,120 @@ final class Model: ObservableObject {
   }
 
   func ensureIndexIfNeeded() {
-    let idx = NSHomeDirectory() + "/.cache/hypersearch/index-home.txt"
-    guard !FileManager.default.fileExists(atPath: idx) else { return }
-    indexing = true
+    Task { await loadIndexes(); onQueryChange(query) }
+  }
+
+  func loadIndexes() async {
+    do {
+      let out = try await runTool(["indexes", "--json"])
+      struct SavedIndex: Decodable { let name: String; let paths: [String]; let count: Int?; let stale: Bool; let exists: Bool }
+      let indexes = try JSONDecoder().decode([SavedIndex].self, from: Data(out.utf8))
+      savedScopes = indexes.compactMap { FEScope(rawValue: $0.name) }
+        .filter { !FEScope.allCases.contains($0) }
+      indexSummaries = Dictionary(uniqueKeysWithValues: indexes.map { item in
+        (item.name, "\(item.count.map { String($0) } ?? "0") base paths · \(item.exists ? (item.stale ? "older snapshot" : "snapshot") : "not indexed") · \(item.paths.joined(separator: ", ")) · exclusions / permissions apply")
+      })
+      let existing = indexes.filter(\.exists).compactMap { FEScope(rawValue: $0.name) }
+      indexedScopes = Set(existing)
+      if !existing.contains(scope), let fallback = existing.first(where: { $0.rawValue == "everything" }) ?? existing.first {
+        scope = fallback
+        UserDefaults.standard.set(fallback.rawValue, forKey: "scope")
+      } else if !availableScopes.contains(scope) { scope = .home }
+      errorMessage = nil
+    } catch { errorMessage = error.localizedDescription }
+  }
+
+  func indexFolder() {
+    let picker = NSOpenPanel()
+    picker.title = "Index a folder or project"
+    picker.message = "Include dotfiles and ignored work. Build and cache folders stay excluded."
+    picker.prompt = "Index Folder"
+    picker.canChooseFiles = false; picker.canChooseDirectories = true
+    picker.allowsMultipleSelection = true
+    let respectIgnore = NSButton(checkboxWithTitle: "Respect .gitignore and .ignore (project source only)", target: nil, action: nil)
+    respectIgnore.sizeToFit()
+    picker.accessoryView = respectIgnore
+    picker.isAccessoryViewDisclosed = true
+    guard picker.runModal() == .OK, let first = picker.urls.first else {
+      if scope == .custom { scope = .home }
+      return
+    }
+    let base = String(first.lastPathComponent.lowercased()
+      .replacingOccurrences(of: "[^a-z0-9_-]", with: "-", options: .regularExpression)
+      .trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+      .prefix(40))
+    let stem = base.isEmpty ? "folder" : base
+    var name = stem, suffix = 2
+    while availableScopes.contains(where: { $0.rawValue == name }) {
+      name = "\(stem)-\(suffix)"; suffix += 1
+    }
+    let args = ["index", "--name", name, "--preset", respectIgnore.state == .on ? "project" : "folder", "--json"]
+      + picker.urls.flatMap { ["--path", $0.path] }
+    indexing = true; errorMessage = nil
     Task {
-      await runTool("index", "--scope", scope.rawValue)
+      do {
+        _ = try await runTool(args)
+        await loadIndexes()
+        if let selected = FEScope(rawValue: name) { scope = selected }
+        showToast("Indexed \(name)")
+      } catch { errorMessage = error.localizedDescription }
       indexing = false
+      if errorMessage == nil { onQueryChange(query,force:true) }
     }
   }
 
-  func onQueryChange(_ q: String) {
+  var selectionRefreshPaused:Bool {deferredSelectionRefresh}
+  private func deferSelectionRefresh() {
+    if !deferredSelectionRefresh {actionError=Self.selectionRefreshMessage}
+    deferredSelectionRefresh=true;liveNote=Self.selectionRefreshMessage
+  }
+  func refreshDeferredResults() {
+    guard deferredSelectionRefresh else {return}
+    deferredSelectionRefresh=false;actionError=nil
+    selectedRows=IndexSet();selectionNeedsConfirmation=true
+    onQueryChange(query,preserveSelection:true,force:true)
+  }
+  private func resumeDeferredSelectionRefresh() {
+    guard deferredSelectionRefresh,selectedRows.count<=1 else {return}
+    deferredSelectionRefresh=false
+    if actionError==Self.selectionRefreshMessage {actionError=nil}
+    let generation=searchGeneration,key=viewKey
+    DispatchQueue.main.async { [weak self] in
+      guard let self,self.searchGeneration==generation,self.viewKey==key else {return}
+      guard self.selectedRows.count<=1 else {self.deferredSelectionRefresh=true;return}
+      self.onQueryChange(self.query,preserveSelection:true,force:true)
+    }
+  }
+  func onQueryChange(_ q: String, preserveSelection: Bool = false,force:Bool=false) {
+    if preserveSelection,displayedQuery==viewKey,selectedRows.count>1 {deferSelectionRefresh();return}
+    if !preserveSelection || displayedQuery != viewKey {
+      deferredSelectionRefresh=false;selectionNeedsConfirmation=false;selectionWasExplicit=false
+      if actionError==Self.selectionRefreshMessage {actionError=nil}
+    }
+    guard requestGate.begin(viewKey,force:force || preserveSelection || errorMessage != nil) else {recordInteraction("query_reused",trigger:"duplicate");return}
+    unknownProperties=0
+    pendingQuickAction=nil;pendingEnd=false;pendingEndAction=nil
+    let usePreview = !preserveSelection && queryViews[viewKey] == nil
+    resultIsProvisional=false
+    let hadSelection=preserveSelection && !selectedRows.isEmpty && resultCount>0
+    let wasSelectionBlocked=selectionNeedsConfirmation
+    let selectedPath = preserveSelection ? currentItem?.path : nil
+    selectedRows=selectionNeedsConfirmation ? IndexSet() : (resultCount>0 ? IndexSet(integer:selected) : IndexSet())
+    selectionAnchor=selected
+    let initialSelection=selectedRows,initialLead=selected
+    let requestedOffset = preserveSelection ? VirtualResults<FEItem>.offset(for:wantedResults.lowerBound) : 0
+    let requestedLimit = VirtualResults<FEItem>.pageSize
+    searchGeneration += 1
+    let generation = searchGeneration
+    resultTask?.cancel();resultTask=nil
+    if !preserveSelection {
+      wantedResults=0..<0
+      if let cached=queryViews[viewKey] {
+        resultCache.removeAll();resultCache.insert(cached.items,at:0,cost:cached.bytes)
+        items=cached.items;totalMatches=cached.total;resultSnapshot=cached.snapshot;lastMs=cached.ms
+        displayedQuery=viewKey;showingStartupCache=false;selected=0;selectedRows=resultCount>0 ? IndexSet(integer:0) : IndexSet();selectionAnchor=0;resultIdentity += 1;virtualRevision += 1
+      }
+    }
     // Query edits leave history mode — unless the edit IS the history
     // entry we just navigated to (text match beats a flag: onQueryChange
     // can fire twice — binding onChange plus an explicit call).
@@ -283,59 +609,491 @@ final class Model: ObservableObject {
       histPos = -1
     }
     searchTask?.cancel()
-    proc?.terminate()
+    foregroundFetch?.cancel()
+    if searching {searching=false};refreshing=false
+    if !preserveSelection {errorMessage=nil;searchNote=""}
+    windowStart = requestedOffset
     let t = q.trimmingCharacters(in: .whitespaces)
-    guard t.count >= 2, !indexing else { items = []; selected = 0; return }
+    inputHint=nil
+    guard !indexing else { items = []; selected = 0; return }
     // Path passthrough: a pasted or typed absolute/~/ path that exists
     // resolves directly — Enter opens it, no index needed.
     let expanded = (t as NSString).expandingTildeInPath
     if (t.hasPrefix("/") || t.hasPrefix("~")),
        FileManager.default.fileExists(atPath: expanded) {
       items = [FEItem(path: expanded)]
-      selected = 0
-      searching = false
+      resultCache.removeAll();displayedQuery=viewKey;resultIdentity += 1;showingStartupCache=false
+      resultCache.insert(items,at:0,cost:expanded.utf8.count*2+256)
+      totalMatches=1;virtualRevision += 1
+      selectedRows=IndexSet(integer:0);selectionAnchor=0;selected = 0; keyboardSelection += 1
+      if searching {searching=false}
       return
     }
+    guard !needsIndex else {
+      items=[];resultCache.removeAll();totalMatches=0;selectedRows=IndexSet();selected=0
+      displayedQuery=viewKey;showingStartupCache=false;virtualRevision += 1
+      errorMessage="\(scope.label) has no saved index. Choose an indexed scope or create this index explicitly."
+      return
+    }
+    ensureSearchService?()
+    inputHint=SearchQueryOptions.incompleteHint(q)
+    if inputHint != nil {searching=true;return}
+    if !preserveSelection {searching=true}
     searchTask = Task {
-      try? await Task.sleep(nanoseconds: 120_000_000)
+      defer {if generation==searchGeneration {if searching {searching=false};refreshing=false}}
+      try? await Task.sleep(nanoseconds: UInt64(display.debounceMs) * 1_000_000)
       guard !Task.isCancelled else { return }
-      searching = true
+      if preserveSelection {refreshing=true} else {searching=true}
       let t0 = Date()
-      let out = await runTool("search", "--scope", scope.rawValue, "-n", "80", t)
-      guard !Task.isCancelled else { return }
-      items = habitBoost(
-        out.split(separator: "\n").map { FEItem(path: String($0)) })
-      lastMs = Int(-t0.timeIntervalSinceNow * 1000)
-      selected = 0
-      searching = false
+      var publishedPreview=false,preservedPreviewSelection=false
+      do {
+        recordInteraction("task_start", trigger: "query")
+        var start = requestedOffset
+        var reply = try await fetchForQuery(t,index:scope.rawValue,offset:start,limit:requestedLimit,generation:generation,preview:usePreview)
+        guard !Task.isCancelled, generation == searchGeneration else { return }
+        if reply.provisional == true {
+          publishReply(reply,query:t,start:start,reset:true)
+          publishedPreview=true;resultIsProvisional=true
+          selectedRows=resultCount>0 ? IndexSet(integer:0) : IndexSet();selectionAnchor=0;selected=0;keyboardSelection += 1
+          lastMs=Int(-t0.timeIntervalSinceNow*1000);searching=false
+          flushQuickAction()
+          guard generation==searchGeneration else {return}
+          try await Task.sleep(nanoseconds:80_000_000)
+          try Task.checkCancellation()
+          reply = try await fetchForQuery(t,index:scope.rawValue,offset:start,limit:requestedLimit,generation:generation)
+          guard !Task.isCancelled, generation == searchGeneration else { return }
+        }
+        if reply.paths.isEmpty, requestedOffset > 0 {
+          start = VirtualResults<FEItem>.offset(for:max(0,(reply.coverage?.matched ?? 0)-1))
+          reply = try await fetchForQuery(t,index:scope.rawValue,offset:start,limit:requestedLimit,generation:generation)
+        }
+        guard !Task.isCancelled, generation == searchGeneration else { return }
+        let outcome=publishFinalReply(reply,query:t,start:start,publishedPreview:publishedPreview,preserveSelection:preserveSelection,initialSelection:initialSelection,initialLead:initialLead)
+        guard outcome.published else {return}
+        preservedPreviewSelection=outcome.retainedSelection
+        if publishedPreview {searchNote += " Exact count ready after \(Int(-t0.timeIntervalSinceNow*1000))ms."}
+        recordInteraction("task_success", trigger: "query")
+      } catch {
+        guard !Task.isCancelled, generation == searchGeneration else { return }
+        pendingEnd=false;pendingEndAction=nil
+        if preserveSelection {liveNote="Background refresh failed: \(error.localizedDescription)"}
+        else {errorMessage=error.localizedDescription}
+      }
+      if publishedPreview,resultIsProvisional,selectedRows.count>1 {deferSelectionRefresh();return}
+      if !preserveSelection && !publishedPreview {lastMs=Int(-t0.timeIntervalSinceNow*1000)}
+      if !preserveSelection,!resultIsProvisional,displayedQuery==viewKey,!items.isEmpty {rememberView()}
+      let matched=selectedPath.flatMap {path in items.firstIndex(where:{$0.path==path}).map{$0+windowStart}}
+      if preservedPreviewSelection {
+        // The exact reply already reconciled the user's selected paths.
+      } else if preserveSelection && (wasSelectionBlocked || (hadSelection && matched == nil)) {
+        selectedRows=IndexSet();selectionNeedsConfirmation=true
+        actionFailure("Results changed; select a file again")
+      } else {
+        let restored=matched ?? (preserveSelection || publishedPreview ? min(selected,max(0,resultCount-1)) : 0)
+        selectedRows=resultCount>0 ? IndexSet(integer:restored) : IndexSet()
+        if selected != restored {selected=restored}
+        selectionAnchor=restored
+      }
+      if resultCount==0,resultFocused {focusSearch()}
+      flushQuickAction()
+      guard generation==searchGeneration else {return}
+      if !preserveSelection && !publishedPreview { keyboardSelection += 1 }
+      if searching {searching=false}
+      if pendingEnd && !resultIsProvisional {
+        let action=pendingEndAction
+        jumpBoundary(last:true)
+        if let action {performSelected(action)}
+      }
+      requestResults(wantedResults.isEmpty ? startRange() : wantedResults)
+    }
+  }
+
+  private func publishFinalReply(_ reply:SearchReply,query:String,start:Int,publishedPreview:Bool,preserveSelection:Bool,initialSelection:IndexSet,initialLead:Int) -> (published:Bool,retainedSelection:Bool) {
+    let changedWhileRefreshing=preserveSelection && (selectedRows.count>1 || selectedRows != initialSelection || selected != initialLead)
+    if !pendingEnd,!selectedRows.isEmpty,((publishedPreview && selectionWasExplicit) || changedWhileRefreshing) {
+      let published=publishExactPreservingSelection(reply,query:query,start:start)
+      return (published,published)
+    }
+    publishReply(reply,query:query,start:start,reset:!preserveSelection && !publishedPreview)
+    resultIsProvisional=false
+    return (true,false)
+  }
+  /// Reconcile by path before replacing a snapshot, never by old row index.
+  private func publishExactPreservingSelection(_ reply:SearchReply,query:String,start:Int) -> Bool {
+    let next=replyItems(reply,query:query,start:start)
+    guard let mapping=ResultSelection.remap(selectedRows,lead:selected,cached:{self.cachedResult(at:$0)?.path},newPaths:next.map(\.path),offset:start) else {
+      if selectedRows.count>1 {deferSelectionRefresh();return false}
+      publishReply(reply,query:query,start:start,reset:false,prepared:next)
+      resultIsProvisional=false;selectedRows=IndexSet();selectionNeedsConfirmation=true
+      actionFailure("Results changed; select a file again")
+      return true
+    }
+    publishReply(reply,query:query,start:start,reset:false,prepared:next)
+    resultIsProvisional=false;selectedRows=mapping.rows
+    if selected != mapping.lead {selected=mapping.lead}
+    selectionAnchor=mapping.lead
+    return true
+  }
+  private func replyItems(_ reply:SearchReply,query:String,start:Int) -> [FEItem] {
+    let found=indexedItems(reply)
+    let ordered=reply.snapshotId != nil || SearchQueryOptions.value("sort",in:query) != nil || start>0
+    return reply.semantic == true || query.isEmpty || ordered ? found : habitBoost(found)
+  }
+  private func publishReply(_ reply:SearchReply,query:String,start:Int,reset:Bool,prepared:[FEItem]?=nil) {
+    errorMessage=nil
+    if reset {resultCache.removeAll();resultIdentity += 1}
+    displayedQuery=viewKey;showingStartupCache=false;windowStart=start
+    cacheSearchProperties(reply.properties ?? [])
+    resultIsSemantic=reply.semantic == true
+    resultHasExplicitSort=reply.snapshotId != nil || SearchQueryOptions.value("sort",in:query) != nil || start>0
+    let updated=prepared ?? replyItems(reply,query:query,start:start)
+    if items != updated {items=updated}
+    if resultSnapshot != reply.snapshotId {resultCache.removeAll()}
+    resultCache.budget=resultBudget
+    if resultCache.insert(updated,at:start,cost:updated.reduce(0){$0+$1.path.utf8.count*2+256}) {virtualRevision += 1}
+    if totalMatches != reply.coverage?.matched {totalMatches=reply.coverage?.matched}
+    unknownProperties=reply.coverage?.metadataUnknown ?? 0
+    resultSnapshot=reply.snapshotId
+    var note=(reply.warnings ?? []).joined(separator:" ")
+    if let normalized=reply.normalizedQuery,normalized != query {note="\(normalized)  \(note)"}
+    if searchNote != note {searchNote=note}
+  }
+
+  private func rememberView() {
+    let cost=items.reduce(0){$0+$1.path.utf8.count*2+256}
+    guard cost<=1024*1024 else {return}
+    let key=viewKey;queryOrder.removeAll{$0==key};queryViews.removeValue(forKey:key)
+    while queryViews.count>=4 || queryViews.values.reduce(0,{$0+$1.bytes})+cost>4*1024*1024 {
+      guard !queryOrder.isEmpty else {break};queryViews.removeValue(forKey:queryOrder.removeFirst())
+    }
+    queryViews[key]=QueryView(items:items,total:totalMatches,snapshot:resultSnapshot,ms:lastMs,bytes:cost);queryOrder.append(key)
+    resultCache.budget=resultBudget
+    if query.trimmingCharacters(in:.whitespaces).isEmpty,windowStart==0 {
+      let first=startupView==nil
+      startupView=WarmResults(scope:scope.rawValue,query:viewOptions.effectiveQuery("",learning:display.habitRanking),total:resultCount,entries:items.map{WarmResults.Entry(path:$0.path,size:$0.indexedSize,mtime:$0.indexedMtime,directory:$0.indexedDirectory)})
+      if first {saveStartupView()}
+    }
+  }
+  func saveStartupView() {
+    do {try startupView?.save(startupFile)}catch {liveNote="Startup cache unavailable: \(error.localizedDescription)"}
+  }
+
+  func pollUpdates() async {
+    guard autoUpdate,!checkingLive,!searching,!refreshing,!indexing,Date().timeIntervalSince(lastLivePoll)>=Double(viewOptions.refreshSeconds) else {return}
+    lastLivePoll=Date()
+    let favoritesChanged=loadPins()
+    checkingLive = true; defer { checkingLive = false }
+    let index = scope.rawValue, generation = searchGeneration
+    do {
+      let update = try await SearchSocket.updates(index: index)
+      guard index == scope.rawValue, generation == searchGeneration, !searching, !indexing else { return }
+      if liveProblem != update.problem {liveProblem=update.problem}
+      let note=update.watching ? (update.pending ?? 0 > 0 ? "Updating changed file properties…" : "Automatic updates active") : "Automatic updates unavailable; reopen the app to retry"
+      if liveNote != note {liveNote=note}
+      let revision = index + update.revision
+      if liveRevision != revision || favoritesChanged {queryViews.removeAll();queryOrder.removeAll()}
+      if liveRevision != revision || (favoritesChanged && SearchQueryOptions.value("favorites",in:query)=="true") {onQueryChange(query,preserveSelection:true)}
+      liveRevision = revision
+    } catch {
+      liveNote = "Automatic updates unavailable: \(error.localizedDescription)"
+      liveRevision = nil
+      ensureSearchService?()
+    }
+  }
+
+  func setAutoUpdate(_ enabled: Bool) {
+    autoUpdate = enabled; UserDefaults.standard.set(enabled, forKey:"autoUpdate")
+    liveRevision = nil; liveNote = enabled ? "Starting automatic updates…" : "Automatic updates paused"
+    updateLiveService?()
+  }
+
+  func saveSearch() {
+    guard query.count <= 4096 else { return }
+    guard !savedSearches.contains(where: { $0.query == query && $0.index == scope.rawValue }) else { showToast("Search already saved"); return }
+    guard savedSearches.count < 32 else { showToast("32 saved searches; remove one in settings"); return }
+    savedSearches.append(SavedSearch(id:UUID(),query:query,index:scope.rawValue))
+    SavedSearch.persist(savedSearches); showToast("Search saved")
+  }
+  func openSearch(_ saved: SavedSearch) {
+    guard let index = FEScope(rawValue:saved.index), availableScopes.contains(index) else { errorMessage = "Saved index is unavailable: \(saved.index)"; return }
+    showOptions = false; scope = index; query = saved.query; onQueryChange(query)
+  }
+  func removeSearch(_ saved: SavedSearch) { savedSearches.removeAll { $0.id == saved.id }; SavedSearch.persist(savedSearches) }
+
+  private func cacheSearchProperties(_ values:[SearchReply.FileProperty]) {
+    for value in values {
+      guard let size=value.size,let modified=value.mtime,let directory=value.dir,directory>=0 else {continue}
+      if metaCache[value.path] == nil, metaCache.count>=1024, let oldest=metaCache.keys.first {metaCache.removeValue(forKey:oldest)}
+      metaCache[value.path]=(Date(),[.size:NSNumber(value:size),.modificationDate:Date(timeIntervalSince1970:modified/1000),.type:directory==1 ? FileAttributeType.typeDirectory : FileAttributeType.typeRegular])
+    }
+  }
+
+  private func indexedItems(_ reply: SearchReply) -> [FEItem] {
+    let properties = Dictionary((reply.properties ?? []).map { ($0.path, $0) }, uniquingKeysWith: { _, latest in latest })
+    return reply.paths.map { FEItem(path: $0, indexedSize: properties[$0]?.size, indexedMtime: properties[$0]?.mtime,indexedDirectory:properties[$0]?.dir.map{$0==1}) }
+  }
+
+  func setQueryOption(_ key:String,_ value:String?) {
+    query=SearchQueryOptions.setting(key,value,in:query);onQueryChange(query)
+  }
+
+  func prepareLookup(properties:Bool = false) {
+    guard !indexing else {return}
+    indexing=true;errorMessage=nil
+    let index=scope.rawValue
+    enrichmentTask=Task {
+      let deadline=Date().addingTimeInterval(300)
+      var inspected=0,finished=false
+      do {
+        for _ in 0..<100 {
+          let remaining=Int(deadline.timeIntervalSinceNow)
+          if Task.isCancelled || remaining<1 {break}
+          indexingStatus=properties ? "Caching file size and date · \(inspected) checked…" : "Preparing fast lookup from saved paths…"
+          let out=try await runTool([properties ? "properties" : "prepare","--index",index,"--seconds",String(min(20,remaining)),"--max-files","10000","--json"])
+          guard !Task.isCancelled else {break}
+          let reply=try JSONSerialization.jsonObject(with:Data(out.utf8)) as? [String:Any]
+          if properties {inspected += reply?["inspected"] as? Int ?? 0;finished = reply?["pending"] as? Int == 0}
+          else {finished = reply?["ready"] as? Bool == true}
+          if finished {break}
+        }
+        if !Task.isCancelled {showToast(finished ? "Search index ready" : "Progress saved; continue in settings")}
+      } catch {if !Task.isCancelled {errorMessage=error.localizedDescription}}
+      indexing=false;indexingStatus="Building index…"
+      if errorMessage == nil {onQueryChange(query,force:true)}
+    }
+  }
+
+  func combineLookups() {
+    guard !indexing else {return}
+    indexing=true;errorMessage=nil;indexingStatus="Combining saved indexes · no folder scan…"
+    enrichmentTask=Task {
+      do {
+        _ = try await runTool(["combine","--name","everything","--replace","--seconds","300","--json"])
+        guard !Task.isCancelled else {indexing=false;return}
+        await loadIndexes();scope=FEScope(rawValue:"everything")!
+        showToast("Combined search ready")
+      }catch{if !Task.isCancelled {errorMessage=error.localizedDescription}}
+      indexing=false;indexingStatus="Building index…";if errorMessage == nil {onQueryChange(query,force:true)}
+    }
+  }
+
+  private func fetchSearch(_ query: String, index: String, offset: Int = 0, limit: Int = 1000, generation: Int? = nil,interactive:Bool=false,preview:Bool=false) async throws -> SearchReply {
+    loadPins()
+    let effectiveQuery=viewOptions.effectiveQuery(query,learning:display.habitRanking)
+    ensureSearchService?()
+    let retryDeadline=Date().addingTimeInterval(10)
+    var failure: Error = Self.serviceStarting
+    for _ in 1...40 {
+      try Task.checkCancellation()
+      let started=Date()
+      do {
+        for _ in 0..<10 {
+          if FileManager.default.fileExists(atPath: SearchSocket.path + ".json") {break}
+          try Task.checkCancellation()
+          try await Task.sleep(nanoseconds:40_000_000)
+        }
+        guard FileManager.default.fileExists(atPath: SearchSocket.path + ".json") else {throw Self.serviceStarting}
+        return try await SearchSocket.search(effectiveQuery,index:index,offset:offset,limit:limit,generation:generation,interactive:interactive,preview:preview)
+      } catch {
+        // A restarted service refuses or drops its first connections while it boots;
+        // only fast failures wait for it, a real slow answer is reported as it is.
+        guard Date()<retryDeadline,!Task.isCancelled,Date().timeIntervalSince(started)<3,
+              Self.transientFailure(error) else {throw error}
+        failure=error
+      }
+      try await Task.sleep(nanoseconds:250_000_000)
+    }
+    throw failure
+  }
+  static let serviceStarting=NSError(domain:"FindEverythingSocket",code:1,userInfo:[NSLocalizedDescriptionKey:"Search service is starting. Retry in a moment."])
+  private static let transientFailures=["Search service is starting. Retry in a moment.","Search service is unavailable","Search service timed out","Search service read failed"]
+  private static func transientFailure(_ error: Error) -> Bool {
+    let ns=error as NSError
+    return ns.domain=="FindEverythingSocket" && transientFailures.contains(ns.localizedDescription)
+  }
+  private func fetchForQuery(_ query:String,index:String,offset:Int,limit:Int,generation:Int,preview:Bool=false) async throws -> SearchReply {
+    guard !Task.isCancelled,generation==searchGeneration else {throw CancellationError()}
+    foregroundFetch?.cancel()
+    let id=UUID(),request=Task {try await fetchSearch(query,index:index,offset:offset,limit:limit,generation:generation,interactive:true,preview:preview)}
+    foregroundID=id;foregroundFetch=request
+    defer {if foregroundID==id {foregroundFetch=nil}}
+    return try await request.value
+  }
+
+  private func startRange() -> Range<Int> {0..<min(resultCount,40)}
+  func requestResults(_ range: Range<Int>) {
+    guard !range.isEmpty, resultCount > 0, displayedQuery==viewKey,!searching,!indexing,!resultIsProvisional,!deferredSelectionRefresh else {return}
+    wantedResults=range
+    guard resultTask == nil else {return}
+    let generation=searchGeneration,q=query,index=scope.rawValue
+    resultTask=Task {
+      defer {if generation==searchGeneration {resultTask=nil}}
+      do {
+        try await Task.sleep(nanoseconds:60_000_000)
+        var attempted=Set<Int>()
+        while !Task.isCancelled,generation==searchGeneration {
+          let offsets=VirtualResults<FEItem>.requests(visible:wantedResults,total:resultCount)
+          guard let offset=offsets.first(where:{!resultCache.contains($0) && !attempted.contains($0)}) else {break}
+          attempted.insert(offset)
+          let reply=try await fetchSearch(q,index:index,offset:offset,limit:VirtualResults<FEItem>.pageSize,generation:generation)
+          guard !Task.isCancelled,generation==searchGeneration else {return}
+          if !acceptResultPage(reply,offset:offset) {break}
+        }
+      }catch {
+        if !Task.isCancelled,generation==searchGeneration {liveNote="Results unavailable: \(error.localizedDescription)"}
+      }
+    }
+  }
+
+  private func acceptResultPage(_ reply:SearchReply,offset:Int) -> Bool {
+    guard let snapshot=resultSnapshot,let incoming=reply.snapshotId else {
+      liveNote="Results cannot be paged until a stable snapshot is available";return false
+    }
+    guard snapshot==incoming else {
+      if selectedRows.count>1 {deferSelectionRefresh()}
+      else {onQueryChange(query,preserveSelection:true,force:true)}
+      return false
+    }
+    let found=indexedItems(reply)
+    resultCache.budget=resultBudget
+    let visible=Set([VirtualResults<FEItem>.offset(for:wantedResults.lowerBound),VirtualResults<FEItem>.offset(for:max(0,wantedResults.upperBound-1))])
+    resultCache.insert(found,at:offset,cost:found.reduce(0){$0+$1.path.utf8.count*2+256},protecting:visible)
+    guard resultCache.contains(offset) else {
+      if visible.contains(offset) {liveNote="Visible result range exceeds RAM cache budget"}
+      return false
+    }
+    if totalMatches != reply.coverage?.matched {totalMatches=reply.coverage?.matched}
+    if offset < wantedResults.upperBound && offset+found.count > wantedResults.lowerBound {virtualRevision += 1}
+    if selectedRows.count<=1,currentItem != nil {selectionDidChange?()}
+    flushQuickAction()
+    return !found.isEmpty
+  }
+
+  func jumpBoundary(last: Bool) {
+    if last && resultIsProvisional {pendingEnd=true;focusResults();return}
+    select(last ? resultCount-1 : 0,trigger:.keyboard)
+  }
+
+  func enrich(repair: Bool = false) {
+    guard !indexing else { return }
+    indexing = true; errorMessage = nil; indexingStatus = "Reading media metadata…"
+    let index = scope.rawValue
+    enrichmentTask = Task {
+      let deadline = Date().addingTimeInterval(300)
+      var processed = 0
+      do {
+        for _ in 0..<10 {
+          let remaining = Int(deadline.timeIntervalSinceNow)
+          if Task.isCancelled || remaining < 1 { break }
+          let out = try await runTool([repair ? "repair-media" : "enrich", "--json", "--index", index, "--kind", "media", "--max-files", "10000", "--seconds", String(min(30, remaining))])
+          guard !Task.isCancelled else { break }
+          let reply = try JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any]
+          let probed = reply?[repair ? "inspected" : "probed"] as? Int ?? 0
+          let pending = reply?["pending"] as? Int ?? 0
+          processed += probed
+          indexingStatus = "\(processed) checked · \(pending) pending"
+          if pending == 0 || probed == 0 { break }
+        }
+      } catch { if !Task.isCancelled { errorMessage = error.localizedDescription } }
+      indexing = false
+      indexingStatus = "Building index…"
+      if errorMessage == nil { onQueryChange(query,force:true) }
+    }
+  }
+
+  func stopIndexing() {
+    enrichmentTask?.cancel()
+    if let running=indexProc {running.terminate();DispatchQueue.global().asyncAfter(deadline:.now()+2){if running.isRunning {kill(running.processIdentifier,SIGKILL)}}}
+  }
+
+  func analyzeSounds(setup: Bool = false) {
+    guard !indexing else { return }
+    indexing = true; errorMessage = nil
+    indexingStatus = setup ? "Installing local sound model (163 MB)…" : "Analyzing sounds · 5 minutes maximum…"
+    let index = scope.rawValue, intent = query
+    enrichmentTask = Task {
+      do {
+        if setup { _ = try await runTool(["semantic", "setup"]) }
+        else {
+          let deadline = Date().addingTimeInterval(300)
+          var processed = 0
+          for _ in 0..<10 {
+            let remaining = Int(deadline.timeIntervalSinceNow)
+            if Task.isCancelled || remaining < 1 { break }
+            let out = try await runTool(["semantic", "index", "--index", index, "--query", intent, "--max-files", "10000", "--seconds", String(min(30, remaining)), "--json"])
+            guard !Task.isCancelled else { break }
+            let reply = try JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any]
+            let analyzed = reply?["analyzed"] as? Int ?? 0, pending = reply?["pending"] as? Int ?? 0
+            processed += analyzed
+            indexingStatus = "\(processed) sounds analyzed · \(pending) pending · Stop keeps saved progress"
+            if pending == 0 || analyzed == 0 { break }
+          }
+        }
+      } catch { if !Task.isCancelled { errorMessage = error.localizedDescription } }
+      indexing = false
+      if errorMessage == nil { onQueryChange(query,force:true) }
     }
   }
 
   func rebuild() {
-    indexing = true
+    guard !indexing else { return }
+    indexing = true; errorMessage = nil
     Task {
-      await runTool("index", "--scope", scope.rawValue)
+      do { _ = try await runTool(["index", "--index", scope.rawValue]); await loadIndexes() }
+      catch { errorMessage = error.localizedDescription }
       indexing = false
-      onQueryChange(query)
+      if errorMessage == nil { onQueryChange(query,force:true) }
     }
   }
 
-  /// Runs `fe <args>`, returns stdout. Cancellable via proc.terminate().
-  private func runTool(_ args: String...) async -> String {
-    guard let fe = fePath else { return "" }
-    return await withCheckedContinuation { cont in
+  /// Runs bounded index and configuration commands and returns stdout.
+  private func runTool(_ args: [String]) async throws -> String {
+    #if FE_NATIVE_TESTS
+    if let testRunTool {return try await testRunTool(args)}
+    #endif
+    guard let fe = fePath else { throw NSError(domain: "fe", code: 1, userInfo: [NSLocalizedDescriptionKey: "fe is missing. Complete tool setup first."]) }
+    return try await withCheckedThrowingContinuation { cont in
       DispatchQueue.global().async {
         let p = Process()
         let pipe = Pipe()
+        let errors = Pipe()
+        let errorLock = NSLock()
+        var errorData = Data()
         p.executableURL = URL(fileURLWithPath: fe)
         p.arguments = args
         p.standardOutput = pipe
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { cont.resume(returning: ""); return }
-        Task { @MainActor in self.proc = p }
+        p.standardError = errors
+        errors.fileHandleForReading.readabilityHandler = { handle in
+          let data = handle.availableData
+          errorLock.lock(); errorData.append(data.prefix(max(0, 4096 - errorData.count))); errorLock.unlock()
+        }
+        do { try p.run() } catch { errors.fileHandleForReading.readabilityHandler = nil; cont.resume(throwing: error); return }
+        if ["index","enrich","repair-media","semantic","prepare","properties","combine"].contains(args.first ?? "") {
+          Task { @MainActor in
+            self.indexProc = p
+            if args.first != "index" && self.enrichmentTask?.isCancelled == true { p.terminate() }
+          }
+        }
+        let timeout = DispatchWorkItem {
+          if p.isRunning {
+            p.terminate()
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+              if p.isRunning { kill(p.processIdentifier, SIGKILL) }
+            }
+          }
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + (args.first == "learn" ? 4 : args.first == "combine" ? 320 : args.first == "semantic" && args.contains("setup") ? 190 : 130), execute: timeout)
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        cont.resume(returning: String(data: data, encoding: .utf8) ?? "")
+        timeout.cancel()
+        Task { @MainActor in
+          if self.indexProc === p { self.indexProc = nil }
+        }
+        errors.fileHandleForReading.readabilityHandler = nil
+        if p.terminationStatus != 0 {
+          errorLock.lock(); let message = String(data: errorData, encoding: .utf8) ?? ""; errorLock.unlock()
+          cont.resume(throwing: NSError(domain: "fe", code: Int(p.terminationStatus), userInfo: [NSLocalizedDescriptionKey: message.isEmpty ? "Index or search failed (\(p.terminationStatus)). Retry or check fe status." : message.trimmingCharacters(in: .whitespacesAndNewlines)]))
+        } else { cont.resume(returning: String(data: data, encoding: .utf8) ?? "") }
       }
     }
   }
@@ -343,19 +1101,130 @@ final class Model: ObservableObject {
   // MARK: actions
 
   var currentItem: FEItem? {
-    let list = visibleItems
-    return list[safe: selected]
+    guard !selectionNeedsConfirmation,displayedQuery==viewKey else {return nil};return cachedResult(at:selected)
+  }
+  var canSearchWeb:Bool {
+    !selectionNeedsConfirmation && !indexing && errorMessage == nil && inputHint == nil && displayedQuery==viewKey && ResultNavigation.shouldSearchWeb(count:resultCount,searching:searching,query:query)
   }
 
   var visibleItems: [FEItem] {
-    query.trimmingCharacters(in: .whitespaces).count >= 2 ? items : recents
+    items
   }
 
-  func open(_ p: String) {
-    recordQuery(query)
-    recordOpen(p)
-    NSWorkspace.shared.open(URL(fileURLWithPath: p))
-    hidePanel?()
+  func setLearningEnabled(_ enabled:Bool) {
+    Task {defer {onQueryChange(query,force:true)};do {_ = try await runTool(["learn",enabled ? "enable" : "disable"])} catch {errorMessage=error.localizedDescription}}
+  }
+  func resetSearchLearning() {
+    Task {do {_ = try await runTool(["learn","reset"]);onQueryChange(query,force:true)} catch {errorMessage=error.localizedDescription}}
+  }
+  private func actionFailure(_ text:String) {actionError=text;showToast(text)}
+
+  /// Resolve the entire selection against one generation and snapshot before acting.
+  private func withSelectedItems(_ action:@escaping ([FEItem])->Void) {
+    actionError=nil
+    let chosen=selectedRows,generation=searchGeneration,snapshot=resultSnapshot
+    guard let rows=ResultSelection.batchRows(chosen,limit:1000),!rows.isEmpty else {
+      actionFailure("Select at most 1,000 files at a time");return
+    }
+    guard !selectionNeedsConfirmation,displayedQuery==viewKey,!searching else {
+      actionFailure("Wait for the current search or select files again");return
+    }
+    if resultIsProvisional && rows.contains(where:{cachedResult(at:$0)==nil}) {
+      actionFailure("Wait for the current search to finish");return
+    }
+    let offsets=Set(rows.map{VirtualResults<FEItem>.offset(for:$0)})
+    guard offsets.count<=100 else {actionFailure("Selection spans too many pages; narrow the selection");return}
+    let currentQuery=query,index=scope.rawValue
+    Task {
+      do {
+        let found=try await ResultSelection.resolve(rows,pageSize:VirtualResults<FEItem>.pageSize,
+          cached:{self.cachedResult(at:$0)},fetch:{offset in
+            guard snapshot != nil else {throw NSError(domain:"FindEverything",code:1,userInfo:[NSLocalizedDescriptionKey:"Wait for the result snapshot"])}
+            let reply=try await self.fetchSearch(currentQuery,index:index,offset:offset,limit:VirtualResults<FEItem>.pageSize,generation:generation)
+            guard reply.snapshotId==snapshot else {throw CancellationError()}
+            return self.indexedItems(reply)
+          },isCurrent:{generation==self.searchGeneration && chosen==self.selectedRows && snapshot==self.resultSnapshot})
+        action(found)
+      } catch is CancellationError {actionFailure("Results or selection changed; select files again")}
+      catch {actionFailure("Could not load selection: \(error.localizedDescription)")}
+    }
+  }
+
+  func open(_ p:String) {openItems([FEItem(path:p)])}
+  func openSelection(with application:URL?=nil) {
+    if application == nil && selectedRows.count<=1 {performSelected(.open);return}
+    withSelectedItems {self.openItems($0,with:application)}
+  }
+  private func openItems(_ items:[FEItem],with explicit:URL?=nil) {
+    actionError=nil
+    guard !items.isEmpty else {return}
+    let context=query,index=scope.rawValue
+    // Preserve the system's normal behavior for individual files and apps.
+    if items.count==1,explicit==nil,openingPreferences.application(forFileName:items[0].name)==nil {
+      let path=items[0].path
+      guard NSWorkspace.shared.open(items[0].url) else {actionFailure("The file could not be opened");return}
+      recordQuery(context);recordOpen(path)
+      if display.habitRanking && !context.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty {
+        Task {do {_ = try await runTool(["learn","open",path,"--query",context,"--index",index])} catch {errorMessage=error.localizedDescription}}
+      }
+      hidePanel?();return
+    }
+    var groups:[URL:[FEItem]]=[:]
+    for item in items {
+      guard FileManager.default.fileExists(atPath:item.path) else {actionFailure("A selected file no longer exists: \(item.name)");return}
+      let configured=openingPreferences.application(forFileName:item.name).map{URL(fileURLWithPath:$0)}
+      guard let app=explicit ?? configured ?? NSWorkspace.shared.urlForApplication(toOpen:item.url),
+        FileManager.default.fileExists(atPath:app.path) else {actionFailure("No available application for \(item.name); check Opening settings");return}
+      groups[app,default:[]].append(item)
+    }
+    Task {
+      var successes:[String]=[],failures:[String]=[]
+      for (app,group) in groups {
+        let error:Error? = await withCheckedContinuation {continuation in
+          NSWorkspace.shared.open(group.map(\.url),withApplicationAt:app,configuration:NSWorkspace.OpenConfiguration()) {_,error in continuation.resume(returning:error)}
+        }
+        if let error {failures.append("\(app.lastPathComponent): \(error.localizedDescription)")}
+        else {successes.append(contentsOf:group.map(\.path))}
+      }
+      if !successes.isEmpty {
+        recordQuery(context);recordOpened(successes)
+        // Keep single-file learning without starting hundreds of processes for a batch.
+        if successes.count==1,display.habitRanking,!context.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty {
+          let path=successes[0]
+          Task {do {_ = try await runTool(["learn","open",path,"--query",context,"--index",index])} catch {errorMessage=error.localizedDescription}}
+        }
+      }
+      if failures.isEmpty {hidePanel?()}
+      else {actionFailure("Opened \(successes.count)/\(items.count). \(failures.joined(separator:"; "))")}
+    }
+  }
+  func revealSelection() {
+    if selectedRows.count<=1,let item=currentItem {reveal(item.path);return}
+    withSelectedItems {NSWorkspace.shared.activateFileViewerSelecting($0.map(\.url))}
+  }
+  func openSelectionFolder() {
+    if selectedRows.count<=1,let item=currentItem {openFolder(item.path);return}
+    revealSelection()
+  }
+  func copySelectionPaths() {
+    if selectedRows.count<=1,let item=currentItem {copyPath(item.path);return}
+    withSelectedItems {self.copyPath($0.map(\.path).joined(separator:"\n"))}
+  }
+  func filterSelectionTypes() {
+    withSelectedItems {items in
+      let extensions=Set(items.compactMap{OpeningPreferences.normalizedExtension($0.url.pathExtension)}).sorted()
+      guard !extensions.isEmpty else {self.actionFailure("Selected items have no file extensions");return}
+      guard let filter=SearchQueryOptions.extensionFilter(extensions.joined(separator:";")) else {self.actionFailure("Select fewer different file types");return}
+      self.query=ResultColumn.type.clearing(in:self.query)
+      self.columnFilter = .type
+      self.setQueryOption("ext",filter)
+    }
+  }
+  func chooseApplicationForSelection() {
+    let picker=NSOpenPanel();picker.title="Open with";picker.prompt="Open"
+    picker.canChooseFiles=true;picker.canChooseDirectories=false;picker.allowedContentTypes=[.applicationBundle]
+    picker.directoryURL=URL(fileURLWithPath:"/Applications",isDirectory:true)
+    if picker.runModal() == .OK,let application=picker.url {openSelection(with:application)}
   }
   func openFolder(_ p: String) {
     var isDir: ObjCBool = false
@@ -364,6 +1233,16 @@ final class Model: ObservableObject {
     NSWorkspace.shared.open(URL(fileURLWithPath: dir))
     hidePanel?()
   }
+  func searchInFolder(_ p:String) {
+    guard !p.isEmpty else {return}
+    let indexed=items.first(where:{$0.path==p})?.indexedDirectory
+    var isDirectory:ObjCBool=false
+    if indexed == nil {FileManager.default.fileExists(atPath:p,isDirectory:&isDirectory)}
+    let folder=(indexed ?? isDirectory.boolValue) ? p : (p as NSString).deletingLastPathComponent
+    query=SearchQueryOptions.restricting(query,to:folder)
+    columnFilter = .path;showActions=false
+    onQueryChange(query);focusSearch()
+  }
   func reveal(_ p: String) {
     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)])
     hidePanel?()
@@ -371,6 +1250,9 @@ final class Model: ObservableObject {
   /// No-results fallback: ↵ with a dead query opens a web search instead
   /// of being a dead end (Raycast fallback-command pattern).
   func searchWeb(_ q: String) {
+    #if FE_NATIVE_TESTS
+    if let testWebAction {testWebAction(q);return}
+    #endif
     let e = q.addingPercentEncoding(
       withAllowedCharacters: .urlQueryAllowed) ?? q
     if let u = URL(string: "https://duckduckgo.com/?q=\(e)") {
@@ -379,22 +1261,19 @@ final class Model: ObservableObject {
     hidePanel?()
   }
   func quickLook(_ p: String) {
-    let pr = Process()
-    pr.executableURL = URL(fileURLWithPath: "/usr/bin/qlmanage")
-    pr.arguments = ["-p", p]
-    pr.standardOutput = FileHandle.nullDevice
-    pr.standardError = FileHandle.nullDevice
-    try? pr.run()
+    showQuickPreview?(p)
   }
   func trash(_ p: String) {
+    #if FE_NATIVE_TESTS
+    if let testTrashAction {testTrashAction(p);return}
+    #endif
     var d = opens
     d.removeValue(forKey: p)
     saveOpens(d)
     try? FileManager.default.trashItem(
       at: URL(fileURLWithPath: p), resultingItemURL: nil)
-    items.removeAll { $0.path == p }
     recents.removeAll { $0.path == p }
-    selected = max(0, min(selected, visibleItems.count - 1))
+    onQueryChange(query,preserveSelection:true)
     showToast("Moved to Trash")
   }
   func duplicate(_ p: String) {
@@ -502,17 +1381,15 @@ final class Model: ObservableObject {
     case .openWith:
       return openWithApps.map { app in
         ActItem(title: app.deletingPathExtension().lastPathComponent,
-                hint: "↵") { _, p in
-          NSWorkspace.shared.open(
-            [URL(fileURLWithPath: p)], withApplicationAt: app,
-            configuration: NSWorkspace.OpenConfiguration())
+                hint: "↵") { m, _ in
+          m.actMenu = .root;m.openSelection(with:app)
         }
       }.filtered(actFilter)
     case .scopes:
-      return FEScope.allCases.map { s in
+      return availableScopes.map { s in
         ActItem(
           title: s.label,
-          hint: "⌘\((FEScope.allCases.firstIndex(of: s) ?? 0) + 1)"
+          hint: FEScope.allCases.firstIndex(of: s).map { "⌘\($0 + 1)" } ?? ""
         ) { m, _ in m.scope = s }
       }.filtered(actFilter)
     case .root: break
@@ -520,14 +1397,16 @@ final class Model: ObservableObject {
     let curPath = currentItem?.path ?? ""
     let isPinned = pinnedSet.contains(curPath)
     let list: [ActItem] = [
-      ActItem(title: "Open", hint: "↵") { m, p in m.open(p) },
-      ActItem(title: "Open Containing Folder", hint: "⌘↵") { m, p in m.openFolder(p) },
-      ActItem(title: "Reveal in Finder", hint: "⌘O") { m, p in m.reveal(p) },
+      ActItem(title: "Open", hint: "↵") { m, _ in m.openSelection() },
+      ActItem(title: "Open Containing Folder", hint: "⌘↵") { m, _ in m.openSelectionFolder() },
+      ActItem(title: "Search in This Folder", hint: "⌘⌥F") {m,_ in m.performSelected(.folder)},
+      ActItem(title: "Reveal in Finder", hint: "⌘O") { m, _ in m.revealSelection() },
       ActItem(title: "Open With…", hint: "→") { m, _ in m.pushOpenWith() },
       ActItem(title: "Open in Terminal", hint: "⌘T") { m, p in m.openTerminal(p) },
-      ActItem(title: "Quick Look", hint: "⌘Y") { m, p in m.quickLook(p) },
-      ActItem(title: isPinned ? "Unpin" : "Pin to Top", hint: "⌘P") { m, p in m.togglePin(p) },
-      ActItem(title: "Copy Path", hint: "⌘C") { m, p in m.copyPath(p) },
+      ActItem(title: "Quick Look Preview", hint: "Space / ⌘Y") { m, _ in m.performSelected(.preview) },
+      ActItem(title: "Focus Search", hint: "⌘F") {m,_ in m.focusSearch(selectAll:true)},
+      ActItem(title:isPinned ? "Remove from favorites" : "Add to favorites",hint:"⌘P") {m,p in m.togglePin(p)},
+      ActItem(title: "Copy Path", hint: "⌘C") { m, _ in m.copySelectionPaths() },
       ActItem(title: "Copy Name", hint: "⌘⇧C") { m, p in m.copyName(p) },
       ActItem(title: "Copy File", hint: "⌘⌥C") { m, p in m.copyFile(p) },
       ActItem(title: "Copy Contents", hint: "⌘⌥⇧C") { m, p in m.copyContents(p) },
@@ -539,7 +1418,20 @@ final class Model: ObservableObject {
         m.actMenu = .scopes; m.actSel = 0; m.actFilter = ""
       },
       ActItem(title: "Toggle Details", hint: "⌘D") { m, _ in m.showDetail.toggle() },
+      ActItem(title: "Switch Window / Popup", hint: "⌘⇧W") { m, _ in m.toggleWindowMode?() },
+      ActItem(title: "Index Media Properties", hint: "") { m, _ in m.enrich() },
+      ActItem(title: "Copy Performance Diagnostics", hint: "") { m, _ in
+        let payload: [String: Any] = ["events": m.interactionEvents, "lastSearchMs": m.lastMs,
+          "mode": m.windowMode ? "window" : "popup", "resultCount": m.items.count]
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+           let text = String(data: data, encoding: .utf8) {
+          NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
+          m.showToast("Diagnostics copied")
+        }
+      },
       ActItem(title: "Rebuild Index", hint: "⌘R") { m, _ in m.rebuild() },
+      ActItem(title: "Index Folder or Project…", hint: "") { m, _ in m.indexFolder() },
+      ActItem(title: "Reload Saved Indexes", hint: "") { m, _ in Task { await m.loadIndexes() } },
       ActItem(title: "Keyboard Shortcuts", hint: "⌘/") { m, _ in m.showHelp = true },
       ActItem(title: "Move to Trash", hint: "⌘⌫") { m, p in m.trash(p) },
       ActItem(title: "Quit Find Everything", hint: "⌘Q") { _, _ in NSApp.terminate(nil) },
@@ -555,122 +1447,50 @@ final class Model: ObservableObject {
   }
 
   func runAction(_ i: Int) {
-    guard let it = currentItem, let a = actItems[safe: i] else { return }
-    a.run(self, it.path)
+    guard let a = actItems[safe: i] else { return }
+    let global = ["Focus Search", "Switch Scope", "Toggle Details", "Switch Window / Popup", "Index Media Properties", "Copy Performance Diagnostics", "Rebuild Index", "Index Folder or Project…", "Reload Saved Indexes", "Keyboard Shortcuts", "Quit Find Everything"]
+    guard currentItem != nil || actMenu == .scopes || global.contains(a.title) else { return }
+    a.run(self, currentItem?.path ?? "")
     // A submenu push keeps the panel open; everything else closes it.
     if actMenu != .root { actSel = 0; actFilter = "" }
     else { showActions = false; actFilter = "" }
   }
+
+  func cycleScope(_ direction: Int) {
+    let all = availableScopes
+    let current = all.firstIndex(of: scope) ?? 0
+    scope = all[(current + direction + all.count) % all.count]
+  }
 }
+
+#if FE_NATIVE_TESTS
+extension Model {
+  func testSeed(paths:[String],query:String,snapshot:String?,selection:IndexSet,lead:Int,total:Int,provisional:Bool=false) {
+    searchTask?.cancel();resultTask?.cancel()
+    self.query=query;displayedQuery=viewKey;searching=false;indexing=false;inputHint=nil
+    items=paths.map{FEItem(path:$0)};resultCache.removeAll()
+    resultCache.insert(items,at:0,cost:items.reduce(0){$0+$1.path.utf8.count*2+256})
+    totalMatches=total;resultSnapshot=snapshot;resultIsProvisional=provisional
+    selectionNeedsConfirmation=false;deferredSelectionRefresh=false;selectionWasExplicit=true
+    selectedRows=selection;selected=lead;selectionAnchor=lead;wantedResults=0..<min(total,items.count)
+    searchGeneration=1;actionError=nil
+  }
+  var testRefreshDeferred:Bool {deferredSelectionRefresh}
+  var testSnapshot:String? {resultSnapshot}
+  func testAcceptPage(_ reply:SearchReply,offset:Int) -> Bool {acceptResultPage(reply,offset:offset)}
+  func testPublishExactPreview(_ reply:SearchReply) -> Bool {publishExactPreservingSelection(reply,query:query,start:0)}
+  func testPublishRefresh(_ reply:SearchReply,initialSelection:IndexSet,initialLead:Int) -> Bool {
+    publishFinalReply(reply,query:query,start:0,publishedPreview:false,preserveSelection:true,initialSelection:initialSelection,initialLead:initialLead).published
+  }
+  var testPendingQuickAction:Bool {pendingQuickAction != nil}
+  func testCancelSearch() {searchGeneration += 1;searchTask?.cancel();searchTask=nil}
+}
+#endif
 
 extension Array where Element == Model.ActItem {
   func filtered(_ f: String) -> [Model.ActItem] {
     f.isEmpty ? self
       : filter { $0.title.localizedCaseInsensitiveContains(f) }
-  }
-}
-
-extension FEScope {
-  func next() -> FEScope {
-    let all = FEScope.allCases
-    let i = all.firstIndex(of: self) ?? 0
-    return all[(i + 1) % all.count]
-  }
-  func prev() -> FEScope {
-    let all = FEScope.allCases
-    let i = all.firstIndex(of: self) ?? 0
-    return all[(i - 1 + all.count) % all.count]
-  }
-}
-
-// MARK: - Installer (GitHub release binaries, no brew/sudo needed)
-
-struct ToolSpec {
-  let name: String
-  let repo: String
-  /// substring that identifies the right asset for this arch
-  let archToken: String
-}
-
-enum Downloader {
-  #if arch(arm64)
-  static let isArm = true
-  #else
-  static let isArm = false
-  #endif
-
-  static var specs: [ToolSpec] {
-    let arm = isArm
-    return [
-      ToolSpec(name: "fe", repo: "Supersynergy/find-everything",
-               archToken: arm ? "fe-darwin-arm64" : "fe-darwin-x64"),
-      ToolSpec(name: "fd", repo: "sharkdp/fd",
-               archToken: arm ? "aarch64-apple-darwin" : "x86_64-apple-darwin"),
-      ToolSpec(name: "rg", repo: "BurntSushi/ripgrep",
-               archToken: arm ? "aarch64-apple-darwin" : "x86_64-apple-darwin"),
-      ToolSpec(name: "fzf", repo: "junegunn/fzf",
-               archToken: arm ? "darwin_arm64" : "darwin_amd64"),
-    ]
-  }
-
-  /// Resolves latest release asset URL containing the arch token.
-  static func latestAsset(repo: String, token: String) async throws -> URL {
-    let api = URL(string: "https://api.github.com/repos/\(repo)/releases/latest")!
-    let (data, _) = try await URLSession.shared.data(from: api)
-    let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-    for a in (json["assets"] as? [[String: Any]]) ?? [] {
-      if let n = a["name"] as? String, n.contains(token),
-         let u = a["browser_download_url"] as? String {
-        return URL(string: u)!
-      }
-    }
-    throw NSError(domain: "fe", code: 1,
-                  userInfo: [NSLocalizedDescriptionKey: "no asset \(token) in \(repo)"])
-  }
-
-  /// Downloads a release asset and installs the binary into binDir.
-  static func install(_ spec: ToolSpec, into binDir: URL) async throws {
-    let url = try await latestAsset(repo: spec.repo, token: spec.archToken)
-    let (tmp, _) = try await URLSession.shared.download(from: url)
-    let work = FileManager.default.temporaryDirectory
-      .appendingPathComponent(UUID().uuidString)
-    try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: work) }
-
-    if url.path.hasSuffix(".zip") {
-      try run("/usr/bin/ditto", ["-x", "-k", tmp.path, work.path])
-    } else if url.path.hasSuffix(".tar.gz") || url.path.hasSuffix(".tgz") {
-      try run("/usr/bin/tar", ["-xzf", tmp.path, "-C", work.path])
-    } else {
-      // raw binary (fe release assets)
-      try FileManager.default.moveItem(
-        at: tmp, to: work.appendingPathComponent(spec.name))
-    }
-    // find the executable inside whatever was unpacked
-    let fm = FileManager.default
-    let en = fm.enumerator(at: work, includingPropertiesForKeys: nil)!
-    let all = en.allObjects as? [URL] ?? []
-    let found = all.first { $0.lastPathComponent == spec.name }
-    guard let src = found else {
-      throw NSError(domain: "fe", code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "\(spec.name) not in archive"])
-    }
-    let dst = binDir.appendingPathComponent(spec.name)
-    try? fm.removeItem(at: dst)
-    try fm.copyItem(at: src, to: dst)
-    try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dst.path)
-  }
-
-  private static func run(_ cmd: String, _ args: [String]) throws {
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: cmd)
-    p.arguments = args
-    try p.run()
-    p.waitUntilExit()
-    if p.terminationStatus != 0 {
-      throw NSError(domain: "fe", code: 3,
-                    userInfo: [NSLocalizedDescriptionKey: "\(cmd) failed"])
-    }
   }
 }
 
@@ -689,55 +1509,108 @@ func relTime(_ d: Date?) -> String {
 }
 
 struct RowView: View {
+  @EnvironmentObject var m: Model
+  @Environment(\.colorScheme) var scheme
   let item: FEItem
   let selected: Bool
   let meta: [FileAttributeKey: Any]?
-  var pinned: Bool = false
-  var isDir: Bool {
-    (meta?[.type] as? FileAttributeType) == .typeDirectory
+  var pinned = false
+  var stripe = false
+  var palette: SearchPalette { .forScheme(scheme) }
+  var label: Color { selected ? .white : palette.text }
+  var secondary: Color { selected ? .white : palette.muted }
+  var directory: Bool { item.indexedDirectory ?? ((meta?[.type] as? FileAttributeType) == .typeDirectory) }
+  var fullDirectory: String { (item.path as NSString).deletingLastPathComponent.replacingOccurrences(of:NSHomeDirectory(),with:"~") }
+  var sizeValue: Double? {
+    let sort = SearchQueryOptions.value("sort",in:m.query)
+    if sort == "big" || sort == "small" { return item.indexedSize }
+    return item.indexedSize ?? (meta?[.size] as? NSNumber)?.doubleValue
+  }
+  var modifiedValue: Date? {
+    let cached = item.indexedMtime.map { Date(timeIntervalSince1970:$0/1000) }
+    let sort = SearchQueryOptions.value("sort",in:m.query)
+    if sort == "new" || sort == "old" { return cached }
+    return cached ?? meta?[.modificationDate] as? Date
   }
   var body: some View {
     HStack(spacing: 10) {
-      Image(nsImage: NSWorkspace.shared.icon(forFile: item.path))
-        .resizable().frame(width: 26, height: 26)
-      VStack(alignment: .leading, spacing: 1) {
-        HStack(spacing: 4) {
-          if pinned {
-            Image(systemName: "pin.fill")
-              .font(.system(size: 8)).foregroundStyle(.secondary)
-          }
-          Text(item.name).font(.system(size: 13, weight: .medium))
-            .lineLimit(1).truncationMode(.middle)
-        }
-        Text(item.dir).font(.system(size: 11))
-          .foregroundStyle(.secondary).lineLimit(1)
+      if m.display.showIcons {
+        Image(nsImage:ResultIcons.icon(for:item.path)).resizable()
+          .frame(width:m.display.compact ? 16 : 24,height:m.display.compact ? 16 : 24)
       }
-      Spacer()
-      if isDir {
-        Text("Folder").font(.system(size: 9, weight: .medium))
-          .padding(.horizontal, 5).padding(.vertical, 2)
-          .background(.quaternary).cornerRadius(4)
-      } else {
-        let ext = (item.path as NSString).pathExtension.uppercased()
-        if !ext.isEmpty {
-          Text(ext).font(.system(size: 9, weight: .medium))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 5).padding(.vertical, 2)
-            .background(.quaternary).cornerRadius(4)
-        }
-        if let n = meta?[.size] as? NSNumber {
-          Text(humanSize(n.doubleValue)).font(.system(size: 10))
-            .foregroundStyle(.tertiary)
-        }
-      }
-      if let d = meta?[.modificationDate] as? Date {
-        Text(relTime(d)).font(.system(size: 10))
-          .foregroundStyle(.tertiary).frame(width: 28, alignment: .trailing)
-      }
+      VStack(alignment:.leading,spacing:3) {
+        HStack(spacing:4) {
+          if pinned {Image(systemName:"star.fill").font(.system(size:10)).foregroundStyle(secondary).accessibilityLabel("Favorite")}
+          Text(item.name).font(.system(size:m.display.fontSize,weight:selected ? .semibold : .regular)).lineLimit(1).truncationMode(.middle)
+        }.foregroundStyle(label)
+        if !m.display.compact && m.display.showPath { Text(fullDirectory).font(.system(size:m.display.fontSize-1)).foregroundStyle(secondary).lineLimit(1).truncationMode(.middle) }
+      }.frame(minWidth:96,maxWidth:.infinity,alignment:.leading)
+      if m.display.compact && m.display.showPath { Text(fullDirectory).font(.system(size:m.display.fontSize-1)).foregroundStyle(secondary).lineLimit(1).truncationMode(.middle).frame(minWidth:100,maxWidth:.infinity,alignment:.leading) }
+      if m.display.showType { Text(directory ? "Folder" : (item.path as NSString).pathExtension.uppercased()).lineLimit(1).frame(width:48,alignment:.leading) }
+      if m.display.showSize { Text(directory ? "—" : sizeValue.map(humanSize) ?? "—").monospacedDigit().frame(width:68,alignment:.trailing) }
+      if m.display.showModified { Text(modifiedValue.map {relTime($0)} ?? "—").monospacedDigit().frame(width:72,alignment:.trailing) }
     }
-    .padding(.horizontal, 12).padding(.vertical, 5)
-    .background(selected ? Color.accentColor.opacity(0.25) : .clear)
+    .font(.system(size:m.display.fontSize-1)).foregroundStyle(secondary)
+    .padding(.horizontal,14).padding(.vertical,m.display.compact ? 5 : 8)
+    .frame(minHeight:m.display.compact ? 28 : 44)
+    .background(selected ? palette.selection : stripe && m.display.stripedRows ? palette.surface : palette.paper)
+    .accessibilityAddTraits(selected ? .isSelected : [])
     .contentShape(Rectangle())
+  }
+}
+
+struct ResultColumnsView: View {
+  @EnvironmentObject var m: Model
+  @Environment(\.colorScheme) var scheme
+  private var palette:SearchPalette {.forScheme(scheme)}
+  private func heading(_ column:ResultColumn) -> some View {
+    let filtered = !column.filters(in:m.query).isEmpty
+    let direction=column.direction(in:m.query)
+    return HStack(spacing:4) {
+      Button {
+        if let sort=column.nextSort(in:m.query) {m.setQueryOption("sort",sort)}
+        else {m.columnFilter=m.columnFilter == column ? nil : column}
+      } label: {
+      HStack(spacing:3) {
+        Text(column.title).lineLimit(1)
+        Image(systemName:direction ?? (column == .type ? "chevron.down" : "arrow.up.arrow.down")).font(.system(size:8,weight:.bold)).frame(width:9)
+        Circle().fill(filtered ? palette.selection : Color.clear).frame(width:4,height:4)
+      }.foregroundStyle(filtered || direction != nil ? palette.text : palette.muted).contentShape(Rectangle())
+      }.buttonStyle(.plain).accessibilityLabel(column == .type ? "Type filter" : "Sort by \(column.title)")
+        .help(column == .type ? "Open type filters" : "Sort by \(column.title) · click again to reverse")
+    }
+  }
+  var body: some View {
+    VStack(spacing:0) {
+      HStack(spacing:10) {
+        Button {m.columnFilter=m.columnFilter == nil ? .name : nil} label:{Image(systemName:"line.3.horizontal.decrease.circle")}
+          .buttonStyle(.plain).frame(width:m.display.compact ? 16 : 24).accessibilityLabel(m.columnFilter == nil ? "Expand filter bar" : "Collapse filter bar")
+        heading(.name).frame(minWidth:96,maxWidth:.infinity,alignment:.leading)
+        if m.display.compact && m.display.showPath {heading(.path).frame(minWidth:100,maxWidth:.infinity,alignment:.leading)}
+        if m.display.showType {heading(.type).frame(width:48,alignment:.leading)}
+        if m.display.showSize {heading(.size).frame(width:68,alignment:.trailing)}
+        if m.display.showModified {heading(.modified).frame(width:72,alignment:.trailing)}
+      }.font(.system(size:11,weight:.semibold)).padding(.horizontal,14).padding(.vertical,8)
+      let active=ResultColumn.allCases.filter{!$0.filters(in:m.query).isEmpty}
+      if !active.isEmpty || SearchQueryOptions.value("favorites",in:m.query)=="true" {
+        HStack(spacing:8) {
+          ScrollView(.horizontal,showsIndicators:false) {
+            HStack(spacing:6) {
+              if SearchQueryOptions.value("favorites",in:m.query)=="true" {
+                Button {m.setQueryOption("favorites",nil)} label:{Label("Favorites ×",systemImage:"star.fill").padding(.horizontal,7).padding(.vertical,4).background(palette.paper).cornerRadius(4)}.buttonStyle(.plain).accessibilityLabel("Clear favorites filter")
+              }
+              ForEach(active) {column in
+                Button {m.query=column.clearing(in:m.query);m.onQueryChange(m.query)} label: {
+                  HStack(spacing:4) {Text(column.title+": "+column.summary(in:m.query)).lineLimit(1);Image(systemName:"xmark").font(.system(size:8,weight:.bold))}
+                    .padding(.horizontal,7).padding(.vertical,4).background(palette.paper).cornerRadius(4)
+                }.buttonStyle(.plain).accessibilityLabel("Clear \(column.title) filter")
+              }
+            }
+          }
+          Button("Clear filters") {m.query=SearchQueryOptions.setting("favorites",nil,in:ResultColumn.allCases.reduce(m.query){$1.clearing(in:$0)});m.onQueryChange(m.query)}.buttonStyle(.borderless)
+        }.font(.system(size:11)).padding(.horizontal,14).padding(.bottom,6)
+      }
+    }.foregroundStyle(palette.text).background(palette.surface)
   }
 }
 
@@ -838,178 +1711,149 @@ struct SetupView: View {
     VStack(spacing: 16) {
       Image(nsImage: NSApp.applicationIconImage).frame(width: 48, height: 48)
       Text("Find Everything").font(.title2.weight(.semibold))
-      Text("Setup downloads the search tools it needs — no admin rights,\nno Spotlight, about 20 MB.")
+      Text("Install fd, ripgrep and fzf with a package manager you trust.\nThis preview does not download or run missing tools for you.")
         .multilineTextAlignment(.center).foregroundStyle(.secondary)
         .font(.system(size: 12))
       Text(m.setupLog).font(.system(size: 11, design: .monospaced))
         .foregroundStyle(.secondary).lineLimit(3)
-      if m.setupRunning { ProgressView().scaleEffect(0.8) }
-      Button(m.setupRunning ? "Installing…" : "Install tools") {
-        install()
-      }
-      .disabled(m.setupRunning)
-      .keyboardShortcut(.defaultAction)
+      Text("brew install fd ripgrep fzf").font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+      Link("Read setup instructions", destination: URL(string: "https://github.com/Supersynergy/find-everything#build-from-source")!)
+      Button("Check tools again") { m.bootstrap() }
+        .keyboardShortcut(.defaultAction)
     }
     .padding(28).frame(maxWidth: .infinity, maxHeight: .infinity)
-  }
-  func install() {
-    Task { @MainActor in
-      m.setupRunning = true
-      do {
-        try FileManager.default.createDirectory(
-          at: FEDirs.binDir, withIntermediateDirectories: true)
-        for spec in Downloader.specs where toolPath(spec.name) == nil {
-          m.setupLog = "Downloading \(spec.name)…"
-          try await Downloader.install(spec, into: FEDirs.binDir)
-        }
-        m.setupLog = "Building index — first run takes a moment…"
-        m.ensureIndexIfNeeded()
-        while m.indexing { try await Task.sleep(nanoseconds: 400_000_000) }
-        m.setupNeeded = false
-      } catch {
-        m.setupLog = "Failed: \(error.localizedDescription)"
-        m.setupRunning = false
-      }
-    }
   }
 }
 
 struct SearchView: View {
   @EnvironmentObject var m: Model
-  @FocusState private var fieldFocused: Bool
-
-  /// Right-click menu on a result row — mirrors the ⌘K panel for the mouse.
-  @ViewBuilder
-  private func rowMenu(_ it: FEItem) -> some View {
-    Button("Open") { m.open(it.path) }
-    Button("Open Containing Folder") { m.openFolder(it.path) }
-    Button("Reveal in Finder") { m.reveal(it.path) }
-    Menu("Open With…") {
-      let apps = NSWorkspace.shared.urlsForApplications(
-        toOpen: URL(fileURLWithPath: it.path))
-      ForEach(apps, id: \.self) { app in
-        Button(app.deletingPathExtension().lastPathComponent) {
-          NSWorkspace.shared.open(
-            [URL(fileURLWithPath: it.path)], withApplicationAt: app,
-            configuration: NSWorkspace.OpenConfiguration())
-        }
-      }
-    }
-    Button("Open in Terminal") { m.openTerminal(it.path) }
-    Button("Quick Look") { m.quickLook(it.path) }
-    Button(m.pinnedSet.contains(it.path) ? "Unpin" : "Pin to Top") {
-      m.togglePin(it.path)
-    }
-    Divider()
-    Button("Copy Path") { m.copyPath(it.path) }
-    Button("Copy Name") { m.copyName(it.path) }
-    Button("Copy File") { m.copyFile(it.path) }
-    Button("Copy Contents") { m.copyContents(it.path) }
-    Divider()
-    Button("Duplicate") { m.duplicate(it.path) }
-    Button("Compress") { m.compress(it.path) }
-    Button("Get Info") { m.getInfo(it.path) }
-    Divider()
-    Button("Move to Trash", role: .destructive) { m.trash(it.path) }
-  }
+  @Environment(\.colorScheme) var scheme
+  var palette: SearchPalette { .forScheme(scheme) }
 
   var body: some View {
     VStack(spacing: 0) {
       HStack(spacing: 8) {
-        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-        TextField("Find every file on your Mac…", text: $m.query)
-          .textFieldStyle(.plain).font(.system(size: 16))
-          .focused($fieldFocused)
+        Image(systemName: "magnifyingglass").foregroundStyle(palette.muted)
+        SearchInput(color:palette.text).frame(height:19)
+          .accessibilityLabel("Search files and folders")
+          .padding(.trailing, m.query.isEmpty ? 0 : 14)
+          .overlay(alignment:.leading) {
+            if m.query.isEmpty { Text("Search files and folders…").font(.system(size:15)).foregroundStyle(palette.muted).allowsHitTesting(false).accessibilityHidden(true) }
+          }
+          // Cancel button like NSSearchField: one click clears, Esc and ⌘Z
+          // stay equivalent.
+          .overlay(alignment:.trailing) {
+            if !m.query.isEmpty {
+              Button {m.clearQuery()} label: {
+                Image(systemName:"xmark.circle.fill")
+                  .font(.system(size:12,weight:.semibold))
+                  .foregroundStyle(palette.muted)
+                  .contentShape(Rectangle())
+              }
+              .buttonStyle(.plain)
+              .help("Clear search · Esc · ⌘⌫")
+              .accessibilityLabel("Clear search")
+            }
+          }
+          .padding(7).background(palette.paper).cornerRadius(5)
+          .overlay(RoundedRectangle(cornerRadius:5).stroke(m.inputFocus == .search ? palette.selection : palette.border,lineWidth:1))
           .onChange(of: m.query) { m.onQueryChange($0) }
-          .onAppear { fieldFocused = true }
+          .onAppear { m.focusSearch() }
           .onReceive(
             NotificationCenter.default.publisher(
               for: NSWindow.didBecomeKeyNotification)
-          ) { _ in fieldFocused = true }
+          ) { note in
+            guard let window=note.object as? NSWindow,window === AppDelegate.shared?.panel,
+              !m.showOptions,m.columnFilter == nil else {return}
+            if m.resultFocused {m.focusResults()} else {m.focusSearch()}
+          }
         Picker("", selection: $m.scope) {
-          ForEach(FEScope.allCases) {
+          ForEach(m.availableScopes) {
             Text($0.label).tag($0)
           }
         }
-        .labelsHidden().frame(width: 110)
+        .labelsHidden().frame(width: 110).accessibilityLabel("Search scope")
         .help("⌘1–⌘6 or ⌘K → Switch Scope")
         .onChange(of: m.scope) { s in
           UserDefaults.standard.set(s.rawValue, forKey: "scope")
-          m.onQueryChange(m.query)
+          if s == .custom { m.indexFolder() }
+          else { m.onQueryChange(m.query) }
         }
+        Menu {
+          Button("Save current search") { m.saveSearch() }.keyboardShortcut("d",modifiers:[.command,.shift])
+          if !m.savedSearches.isEmpty { Divider() }
+          ForEach(m.savedSearches) { saved in Button(saved.title) { m.openSearch(saved) } }
+        } label: { Image(systemName:"bookmark") }
+          .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("Saved searches")
+        Button {m.showSortBar.toggle()} label:{Image(systemName:"arrow.up.arrow.down")}.buttonStyle(.borderless)
+          .accessibilityLabel(m.showSortBar ? "Collapse sort bar" : "Expand sort bar").help("Sort options · ⌘⇧S")
+        Button {m.columnFilter=m.columnFilter == .type ? nil : .type} label:{Image(systemName:"line.3.horizontal.decrease.circle")}.buttonStyle(.borderless)
+          .accessibilityLabel("Filter file types").help("Filter one or several file extensions")
+        Button {m.setQueryOption("favorites",SearchQueryOptions.value("favorites",in:m.query)=="true" ? nil : "true")} label:{Image(systemName:SearchQueryOptions.value("favorites",in:m.query)=="true" ? "star.fill" : "star")}.buttonStyle(.borderless).accessibilityLabel("Filter favorites").help("Favorites only · combine with other filters")
+        Button { m.indexFolder() } label: { Image(systemName: "folder.badge.plus") }
+          .buttonStyle(.borderless)
+          .accessibilityLabel("Index folder or project")
+          .help("Add a folder or project index")
+          .disabled(m.indexing)
+        Button { m.toggleWindowMode?() } label: { Image(systemName: m.windowMode ? "rectangle.compress.vertical" : "macwindow") }
+          .buttonStyle(.borderless)
+          .accessibilityLabel(m.windowMode ? "Switch to popup mode" : "Switch to window mode")
+          .help("Switch window / popup · ⌘⇧W")
+        Button { m.showOptions.toggle() } label: { Image(systemName: "gearshape") }
+          .buttonStyle(.borderless).accessibilityLabel("Search options")
+          .help("Options · ⌘,")
+          .popover(isPresented: $m.showOptions, arrowEdge: .bottom) { SearchOptionsView().environmentObject(m) }
       }
-      .padding(.horizontal, 14).padding(.vertical, 11)
+      .foregroundStyle(palette.text).padding(.horizontal,14).padding(.vertical,9).background(palette.surface)
       Divider()
+      ResultColumnsView()
+      ResultSortBar()
+      ResultFiltersView()
+      if let error = m.actionError ?? m.errorMessage ?? m.shortcutWarning {
+        HStack {
+          Text(error).font(.system(size: 11)).foregroundStyle(.red).lineLimit(3)
+          Spacer()
+          if m.actionError != nil {
+            if m.selectionRefreshPaused {Button("Refresh") {m.refreshDeferredResults()}}
+            Button("Dismiss") {m.actionError=nil}
+          }
+          else if error.contains("semantic setup") {
+            Button("Set up sound search") { m.analyzeSounds(setup: true) }.disabled(m.indexing)
+          } else if m.needsIndex {
+            Button("Index \(m.scope.label)") { m.rebuild() }.disabled(m.indexing)
+            Button("Index Folder…") { m.indexFolder() }.disabled(m.indexing)
+          } else if m.errorMessage != nil { Button("Retry") { m.onQueryChange(m.query) }.disabled(m.indexing) }
+        }.padding(10)
+      }
       Group {
         if m.indexing {
           VStack(spacing: 8) {
             ProgressView().scaleEffect(0.8)
-            Text("Building index…").font(.system(size: 12))
+            Text(m.indexingStatus).font(.system(size: 12))
               .foregroundStyle(.secondary)
+            Button("Stop") { m.stopIndexing() }
           }.frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if m.query.trimmingCharacters(in: .whitespaces).count < 2 {
-          if m.recents.isEmpty {
-            Text("Every file on your Mac. No Spotlight needed.")
-              .font(.system(size: 12)).foregroundStyle(.secondary)
-              .frame(maxWidth: .infinity, maxHeight: .infinity)
-          } else {
-            VStack(alignment: .leading, spacing: 0) {
-              ScrollView {
-                LazyVStack(spacing: 0) {
-                  ForEach(m.recents.indices, id: \.self) { i in
-                    if let h = m.headerBefore(i) { SectionLabel(h) }
-                    RowView(item: m.recents[i], selected: i == m.selected,
-                            meta: m.meta(for: m.recents[i].path),
-                            pinned: m.pinnedSet.contains(m.recents[i].path))
-                      .id(i)
-                      .onTapGesture(count: 2) { m.open(m.recents[i].path) }
-                      .onTapGesture(count: 1) { m.selected = i }
-                      .onHover { if $0 { m.selected = i } }
-                      .contextMenu { rowMenu(m.recents[i]) }
-                      .onDrag {
-                        NSItemProvider(
-                          object: NSURL(fileURLWithPath: m.recents[i].path))
-                      }
-                  }
-                }
-              }
-            }.frame(maxHeight: .infinity, alignment: .top)
-          }
         } else if m.items.isEmpty {
           VStack(spacing: 6) {
-            Text(m.searching ? "Searching…" : "No matches")
+            Text(m.searching ? "Searching…" : m.needsIndex ? "No saved index for this scope" : m.unknownProperties>0 ? "No matches with known file properties" : "No matches")
               .font(.system(size: 12)).foregroundStyle(.secondary)
-            if !m.searching && m.query.count > 1 {
-              Text("↵ search the web · try  ext:  in:  type:  !")
+            if !m.searching && m.errorMessage == nil && m.query.count > 1 {
+              Text(m.unknownProperties>0 ? "Size/date are unknown for \(m.unknownProperties) matching paths. See Search details." : "Try a name, ext:pdf, or open search help.")
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
             }
           }
           .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
           HStack(spacing: 0) {
-            ScrollViewReader { proxy in
-              ScrollView {
-                LazyVStack(spacing: 0) {
-                  ForEach(m.items.indices, id: \.self) { i in
-                    if let h = m.headerBefore(i) { SectionLabel(h) }
-                    RowView(item: m.items[i], selected: i == m.selected,
-                            meta: m.meta(for: m.items[i].path),
-                            pinned: m.pinnedSet.contains(m.items[i].path))
-                      .id(i)
-                      .onTapGesture(count: 2) { m.open(m.items[i].path) }
-                      .onTapGesture(count: 1) { m.selected = i }
-                      .onHover { if $0 { m.selected = i } }
-                      .contextMenu { rowMenu(m.items[i]) }
-                      .onDrag {
-                        NSItemProvider(
-                          object: NSURL(fileURLWithPath: m.items[i].path))
-                      }
-                  }
+            VirtualResultTable {item,row in
+              AnyView(VStack(spacing:0) {
+                if m.hasResultGroups {
+                  Text(m.headerBefore(row) ?? "").font(.system(size:9,weight:.semibold)).foregroundStyle(.secondary).frame(maxWidth:.infinity,alignment:.leading).padding(.horizontal,14).frame(height:20)
                 }
-              }
-              .onChange(of: m.selected) { i in
-                withAnimation(.none) { proxy.scrollTo(i, anchor: .center) }
-              }
+                RowView(item:item,selected:m.selectedRows.contains(row),meta:(item.indexedSize == nil || item.indexedDirectory == nil) ? m.meta(for:item.path) : nil,
+                              pinned:m.pinnedSet.contains(item.path),stripe:row % 2 == 1)
+                .environmentObject(m)
+              })
             }
             if m.showDetail, let it = m.currentItem {
               Divider()
@@ -1022,20 +1866,25 @@ struct SearchView: View {
       .frame(maxHeight: .infinity)
       Divider()
       HStack(spacing: 10) {
-        if !m.toast.isEmpty {
+          Button { m.showOptions = true } label: { Image(systemName:"info.circle").frame(width:16,height:16) }
+            .buttonStyle(.plain).help("Search details and index coverage").accessibilityLabel("Search details")
+        if let hint=m.inputHint {
+          Text(hint).font(.system(size:10)).foregroundStyle(palette.muted).lineLimit(1)
+        } else if !m.toast.isEmpty {
           Text(m.toast).font(.system(size: 10))
             .foregroundStyle(.secondary)
             .transition(.opacity)
+        } else if m.viewOptions.keyboardHints {
+          Text(m.resultFocused ? "Space Preview · ↵ Open · Tab Actions" : "↑↓ Results · ⌘F Search · ⌘K Actions")
+            .font(.system(size:10)).foregroundStyle(palette.muted).lineLimit(1).frame(width:230,alignment:.leading)
         }
         Spacer()
-        Text(m.searching
-          ? "…"
-          : m.query.count >= 2
-            ? "\(m.items.count) results · \(m.lastMs)ms"
-            : m.scope.label)
-          .font(.system(size: 10)).foregroundStyle(.tertiary)
+        Text(!m.items.isEmpty
+          ? m.showingStartupCache ? "\(m.totalMatches ?? m.items.count) cached paths" : "\(m.totalMatches ?? m.items.count)\(m.resultIsProvisional ? "+" : "") results · \(m.lastMs)ms"
+          : m.scope.label)
+          .font(.system(size: 11)).monospacedDigit().foregroundStyle(palette.muted)
         Button { m.showHelp = true } label: {
-          Image(systemName: "questionmark.circle")
+          Image(systemName: "questionmark.circle").accessibilityLabel("Search help")
             .font(.system(size: 13)).foregroundStyle(.secondary)
         }
         .buttonStyle(.plain).help("Keyboard shortcuts ⌘/")
@@ -1043,22 +1892,25 @@ struct SearchView: View {
           Image(systemName: "ellipsis.circle")
             .font(.system(size: 13)).foregroundStyle(.secondary)
         }
-        .buttonStyle(.plain).help("Actions ⌘K")
+        .buttonStyle(.plain).help("Actions ⌘K").accessibilityLabel("Actions")
       }
-      .padding(.horizontal, 14).padding(.vertical, 7)
+      .foregroundStyle(palette.muted).padding(.horizontal,14).padding(.vertical,7).background(palette.surface)
     }
     .overlay(alignment: .trailing) {
       if m.showActions {
-        ActionPanelView()
-          .environmentObject(m)
-          .transition(.move(edge: .trailing).combined(with: .opacity))
+        ZStack(alignment:.trailing) {
+          Color.black.opacity(0.001).contentShape(Rectangle()).onTapGesture {m.showActions=false}
+          ActionPanelView().environmentObject(m)
+        }
       }
     }
+    .onChange(of:m.columnFilter) {value in if value == nil {if m.resultFocused {m.focusResults()} else {m.focusSearch()}}}
     .overlay(alignment: .center) {
       if m.showHelp {
-        HelpView()
-          .environmentObject(m)
-          .transition(.opacity.combined(with: .scale(scale: 0.96)))
+        ZStack {
+          Color.black.opacity(0.001).contentShape(Rectangle()).onTapGesture {m.showHelp=false}
+          HelpView().environmentObject(m)
+        }
       }
     }
   }
@@ -1158,16 +2010,19 @@ struct HelpView: View {
   @EnvironmentObject var m: Model
   let groups: [(String, String)] = [
     ("Navigate", "↑ ↓ · ^N ^P · PgUp PgDn · ⌘↑ ⌘↓ · Home End"),
-    ("History", "↑ on first row cycles past queries · ⇧Tab parent dir"),
-    ("Open", "↵ open · ⌘↵ folder · ⌥↵ reveal · ⌘Y quick look"),
+    ("History", "⌥↑ / ⌥↓ past queries · ⌘⌫ clear line · ⌘Z restore"),
+    ("Path", "⇧Tab parent dir · ⌘L / ⌘F search field · ⌘A select all"),
+    ("Open", "↵ open · ⌘↵ folder · ⌥↵ reveal · Space / ⌘Y preview"),
     ("Actions", "⌘K or Tab · type to filter · → submenu · ← back"),
     ("File", "⌘C path · ⌘⇧C name · ⌘⌥C file · ⌘⌥⇧C contents"),
     ("File 2", "⌘I info · ⌘P pin · ⌘⌫ trash"),
     ("Tools", "⌘T terminal · ⌘R rebuild index"),
     ("Scope", "⌘1–⌘6 · ⌘⌥← ⌘⌥→ cycle"),
     ("Query", "ext:md · *.pdf · type:image · !tmp · \"exact\" · a|b"),
-    ("Query 2", "in:downloads · invoice in downloads · sort:new · size:>10m · dm:today"),
-    ("Panel", "⌥Space toggle · ⌘W hide · ⌘Q quit · ⎋ back"),
+    ("Query 2", "audio: duration:<1s · channels:1 · samplerate:>=44.1k"),
+    ("Describe", "(kurze düstere Lasersounds) · local audio ranking"),
+    ("Options", "⌘, · automatic updates · details · audio tools"),
+    ("Panel", "⌘⇧W window / popup · ⌥Space toggle · ⌘W hide"),
   ]
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
@@ -1202,6 +2057,7 @@ struct HelpView: View {
 
 final class KeyPanel: NSPanel {
   override var canBecomeKey: Bool { true }
+  override var canBecomeMain: Bool { true }
 }
 
 @MainActor
@@ -1210,17 +2066,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   let model = Model()
   var panel: KeyPanel!
   var hotkeyRef: EventHotKeyRef?
+  var hotkeyHandler: EventHandlerRef?
+  var statusItem: NSStatusItem?
+  let quickPreview=QuickPreviewController()
+  var hotkeyRegistration: OSStatus = noErr
+  var hotkeyHandlerStatus: OSStatus = noErr
+  var hotkeyEvents = 0
   var keyMonitor: Any?
+  var serviceProcess: Process?
+  var terminationSignal: DispatchSourceSignal?
 
   func applicationDidFinishLaunching(_ n: Notification) {
     AppDelegate.shared = self
-    NSApp.setActivationPolicy(.accessory)
+    signal(SIGTERM, SIG_IGN)
+    let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+    termination.setEventHandler { NSApp.terminate(nil) }
+    termination.resume(); terminationSignal = termination
+    applyDockVisibility()
+    installApplicationMenu()
 
     let p = KeyPanel(
       contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),
       styleMask: [.nonactivatingPanel, .titled, .fullSizeContentView],
       backing: .buffered, defer: false)
     p.titleVisibility = .hidden
+    p.title = "Find Everything"
+    p.isReleasedWhenClosed = false
     p.titlebarAppearsTransparent = true
     p.isMovableByWindowBackground = true
     p.isFloatingPanel = true
@@ -1229,20 +2100,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     p.hidesOnDeactivate =
       ProcessInfo.processInfo.environment["FE_KEEP_VISIBLE"] != "1"
     p.collectionBehavior = [.moveToActiveSpace]
-    p.isOpaque = false
-    p.backgroundColor = .clear
+    p.isOpaque = true
+    p.backgroundColor = .windowBackgroundColor
     let host = NSHostingView(rootView: RootView().environmentObject(model))
     p.contentView = host
     p.center()
     panel = p
 
-    model.hidePanel = { [weak self] in self?.panel?.orderOut(nil) }
+    model.hidePanel = { [weak self] in if self?.model.windowMode != true { self?.panel?.orderOut(nil) } }
+    model.toggleWindowMode = { [weak self] in self?.switchWindowMode() }
+    model.updateDockVisibility = { [weak self] in self?.applyDockVisibility() }
+    model.showQuickPreview = { [weak self] path in guard let self else {return};self.quickPreview.toggle(path,parent:self.panel,autoplay:self.model.viewOptions.autoplayPreview) }
+    model.showQuickPreviews = { [weak self] paths in guard let self else {return};self.quickPreview.toggle(paths,parent:self.panel,autoplay:self.model.viewOptions.autoplayPreview) }
+    model.selectionDidChange = { [weak self] in
+      guard let self,self.quickPreview.isVisible else {return}
+      if let item=self.model.currentItem {self.quickPreview.update(item.path)} else if self.model.resultCount==0 {self.quickPreview.close()}
+    }
+    model.ensureSearchService = { [weak self] in self?.startSearchService() }
+    model.updateLiveService = { [weak self] in
+      guard let self else { return }
+      if let process = self.serviceProcess, process.isRunning {
+        process.terminationHandler = { [weak self] _ in Task { @MainActor in self?.serviceProcess = nil; self?.startSearchService() } }
+        process.terminate()
+      } else { self.startSearchService() }
+    }
+    applyWindowMode()
+    startSearchService()
+    Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+      Task { @MainActor in guard let self, self.panel?.isVisible == true else { return }; await self.model.pollUpdates() }
+    }
     // A local monitor sees every key BEFORE the responder chain — the
     // text field's editor would otherwise swallow arrows, return and
     // characters long before they reached the panel's keyDown.
     keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
       [weak self] ev in
-      guard let self, ev.window === self.panel else { return ev }
+      guard let self else {return ev}
+      if ev.window === self.quickPreview.panel {
+        if [49,53].contains(ev.keyCode) {self.quickPreview.close();self.panel.makeKeyAndOrderFront(nil);self.model.focusResults();return nil}
+        if [125,126].contains(ev.keyCode) {
+          let direction=ev.keyCode == 125 ? 1 : -1
+          if !self.quickPreview.step(direction) {self.model.select(self.model.selected+direction,trigger:.keyboard)}
+          return nil
+        }
+        return ev
+      }
+      guard ev.window === self.panel else { return ev }
       return self.handleKey(ev) ? nil : ev
     }
     // FE_REMOTE=1: deterministic remote control for UI tests and power
@@ -1258,6 +2160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in self.handleRemote(s.trimmingCharacters(in: .whitespacesAndNewlines)) }
       }
     }
+    installStatusItem()
     registerHotkey()
     model.bootstrap()
     showPanel()
@@ -1270,14 +2173,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // makes ↑↓ actually fire on real hardware.
     let mods = ev.modifierFlags.intersection(
       [.command, .option, .control, .shift])
+    if mods.isEmpty && ev.keyCode == 53 {
+      if m.showHelp {m.showHelp=false;return true}
+      if m.showActions {m.showActions=false;m.actFilter="";return true}
+      if m.showOptions {m.showOptions=false;return true}
+      if m.columnFilter != nil {m.columnFilter=nil;return true}
+      if m.showSortBar {m.showSortBar=false;return true}
+    }
     // These work from anywhere — panel open, action menu open, typing.
     switch (mods, ev.keyCode) {
     case ([.command], 12): NSApp.terminate(nil); return true      // ⌘Q
     case ([.command], 13): panel?.orderOut(nil); return true      // ⌘W
+    case ([.command, .shift], 13): switchWindowMode(); return true
+    case ([.command], 43): m.showOptions.toggle(); return true
+    case ([.command, .shift], 2): m.saveSearch(); return true
+    case ([.command], 37),([.command],3):
+      m.focusSearch(selectAll:true);return true
+    case ([.command],9):
+      if m.resultFocused {m.focusSearch(selectAll:true)};return false
+    case ([.command,.shift],3):m.columnFilter=m.columnFilter == nil ? .name : nil;return true
+    case ([.command,.option],3):m.performSelected(.folder);return true
+    case ([.command,.shift],1):m.showSortBar.toggle();return true
+    case ([.command,.shift],35):m.setQueryOption("favorites",SearchQueryOptions.value("favorites",in:m.query)=="true" ? nil : "true");return true
     case ([.command], 40):                                        // ⌘K
       m.showActions ? (m.showActions = false) : m.showActionsPanel()
       return true
     default: break
+    }
+    if m.editingColumnFilter {return false}
+    if m.showOptions {
+      if mods.isEmpty && ev.keyCode == 53 { m.showOptions = false; return true }
+      return false
     }
     // Help overlay: everything closes it, nothing else.
     if m.showHelp {
@@ -1291,6 +2217,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Action panel: its own navigation — arrows, type-to-filter, submenus.
     if m.showActions {
       switch (mods, ev.keyCode) {
+      case ([],48):m.showActions=false;return true
       case ([], 125), ([.control], 45):
         m.actSel = min(m.actSel + 1, m.actItems.count - 1); return true
       case ([], 126), ([.control], 35):
@@ -1316,49 +2243,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
       default:
         // type-to-filter: printable characters narrow the action list
-        if (mods.isEmpty || mods == [.shift]),
-           let s = ev.charactersIgnoringModifiers, !s.isEmpty,
-           let c = s.unicodeScalars.first,
-           c.value < 0xF700, !CharacterSet.controlCharacters.contains(c) {
+        if (mods.isEmpty || mods == [.shift]),let s=ev.characters,ResultNavigation.isSearchText(s) {
           m.actFilter += s; m.actSel = 0
         }
         return true
       }
     }
     switch (mods, ev.keyCode) {
+    case ([.shift],125) where m.resultFocused: m.extendSelection(1);return true
+    case ([.shift],126) where m.resultFocused: m.extendSelection(-1);return true
+    case ([],49):
+      if ResultNavigation.previewOnSpace(resultFocused:m.resultFocused,editingFilter:m.editingColumnFilter) {
+        m.performSelected(.preview);return true
+      }
+      return false
     case ([], 125), ([.control], 45):                             // ↓ / ^N
-      if m.histPos >= 0 { _ = m.historyDown(); return true }
-      m.selected = max(0, min(m.selected + 1, m.visibleItems.count - 1))
+      m.select(ResultNavigation.arrow(1,current:m.selected,count:m.resultCount,focus:m.inputFocus), trigger:.keyboard)
       return true
     case ([], 126), ([.control], 35):                             // ↑ / ^P
-      if (m.selected == 0 || m.histPos >= 0) && m.historyUp() {
-        return true
-      }
-      m.selected = max(m.selected - 1, 0); return true
+      m.select(ResultNavigation.arrow(-1,current:m.selected,count:m.resultCount,focus:m.inputFocus), trigger:.keyboard);return true
+    case ([.option], 126): _ = m.historyUp(); return true
+    case ([.option], 125): _ = m.historyDown(); return true
     case ([], 116):                                               // PgUp
-      m.selected = max(0, m.selected - 8); return true
+      m.select(m.selected - max(1, Int((panel.frame.height - 110) / 40)), trigger: .keyboard); return true
     case ([], 121):                                               // PgDn
-      m.selected = min(m.selected + 8, max(0, m.visibleItems.count - 1))
+      m.select(m.selected + max(1, Int((panel.frame.height - 110) / 40)), trigger: .keyboard)
       return true
+    // While the caret is in the search field, Home/End and ⌘↑/⌘↓ stay
+    // text navigation instead of stealing the line jumps.
     case ([], 115), ([.command], 126):                            // Home / ⌘↑
-      m.selected = 0; return true
+      guard m.resultFocused else {return false}
+      m.jumpBoundary(last: false); return true
     case ([], 119), ([.command], 125):                            // End / ⌘↓
-      m.selected = max(0, m.visibleItems.count - 1); return true
+      guard m.resultFocused else {return false}
+      m.jumpBoundary(last: true); return true
     case ([], 36), ([], 76):                                      // ↵ open
-      if let it = m.currentItem { m.open(it.path) }
-      else if m.query.count > 1 && !m.searching {
-        m.searchWeb(m.query) // dead query -> web fallback, not a dead end
-      }
+      if m.canSearchWeb {m.searchWeb(m.query)}
+      else {m.openSelection()}
       return true
     case ([.command], 36), ([.command], 76):                      // ⌘↵ folder
-      if let it = m.currentItem { m.openFolder(it.path) }
+      m.openSelectionFolder()
       return true
     case ([.option], 36), ([.option], 76):                        // ⌥↵ reveal
       if let it = m.currentItem { m.reveal(it.path) }
       return true
     case ([], 53):                                                // esc
-      if !m.query.isEmpty { m.query = "" } else { panel?.orderOut(nil) }
+      if m.resultFocused {m.focusSearch()} else if !m.query.isEmpty {m.clearQuery()} else {panel?.orderOut(nil)}
       return true
+    case ([.command], 6):                                         // ⌘Z
+      if m.inputFocus == .search, m.restoreClearedQuery() {return true}
+      return false
+    case ([],123) where m.resultFocused:m.focusSearch();return true
+    case ([],124) where m.resultFocused:m.showActionsPanel();return true
+    case ([],51) where m.resultFocused:
+      if !m.query.isEmpty {m.query.removeLast()};m.focusSearch();return true
     case ([], 48): m.showActionsPanel(); return true              // tab
     case ([.shift], 48):                                          // ⇧Tab
       // Path mode: pop one path component (Raycast's ⇧Tab = parent dir).
@@ -1378,9 +2316,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     case ([.command], 35):                                        // ⌘P
       if let it = m.currentItem { m.togglePin(it.path) }; return true
     case ([.command], 31):                                        // ⌘O
-      if let it = m.currentItem { m.reveal(it.path) }; return true
+      m.revealSelection(); return true
     case ([.command], 8):                                         // ⌘C
-      if let it = m.currentItem { m.copyPath(it.path) }; return true
+      if !m.resultFocused {return false}
+      m.copySelectionPaths(); return true
     case ([.command, .shift], 8):                                 // ⌘⇧C
       if let it = m.currentItem { m.copyName(it.path) }; return true
     case ([.command, .option], 8):                                // ⌘⌥C
@@ -1390,12 +2329,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     case ([.command], 17):                                        // ⌘T
       if let it = m.currentItem { m.openTerminal(it.path) }; return true
     case ([.command], 16):                                        // ⌘Y
-      if let it = m.currentItem { m.quickLook(it.path) }; return true
+      m.performSelected(.preview);return true
     case ([.command], 15): m.rebuild(); return true               // ⌘R
     case ([.command], 51):                                        // ⌘⌫
-      if let it = m.currentItem { m.trash(it.path) }; return true
-    case ([.command, .option], 124): m.scope = m.scope.next(); return true
-    case ([.command, .option], 123): m.scope = m.scope.prev(); return true
+      // Typing: the standard macOS way to delete the whole line.
+      // In the results it keeps moving the selected file to the Trash.
+      if m.resultFocused {if let it = m.currentItem { m.trash(it.path) }}
+      else {m.clearQuery()}
+      return true
+    case ([.command, .option], 124): m.cycleScope(1); return true
+    case ([.command, .option], 123): m.cycleScope(-1); return true
     // ⌘1..⌘6 scope switching
     case ([.command], 18): m.scope = .home; return true
     case ([.command], 19): m.scope = .downloads; return true
@@ -1403,7 +2346,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     case ([.command], 21): m.scope = .applications; return true
     case ([.command], 23): m.scope = .all; return true
     case ([.command], 22): m.scope = .custom; return true
-    default: return false
+    default:
+      if m.resultFocused,(mods.isEmpty || mods == [.shift]),let text=ev.characters,ResultNavigation.isSearchText(text) {
+        m.query=SearchQueryOptions.replacingText(text,in:m.query);m.focusSearch();return true
+      }
+      return false
     }
   }
 
@@ -1461,17 +2408,124 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   @objc func showPanel() {
-    panel?.center()
+    preparePanelFocus()
     panel?.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
-    // Raycast habit: reopening selects the previous query so typing replaces it.
-    DispatchQueue.main.async {
-      NSApp.sendAction(#selector(NSResponder.selectAll(_:)), to: nil, from: nil)
+    // Target the search field directly; never send selectAll to the results table.
+    DispatchQueue.main.async { [weak self] in self?.focusPanelSearch() }
+  }
+  func preparePanelFocus() {model.inputFocus = .search}
+  func focusPanelSearch() {
+    guard model.inputFocus == .search else {return}
+    model.focusSearch(selectAll:true)
+  }
+
+  private func installApplicationMenu() {
+    let menu = NSMenu()
+    let applicationItem = NSMenuItem(), applicationMenu = NSMenu(title: "Find Everything")
+    applicationMenu.addItem(NSMenuItem(title: "Quit Find Everything", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    applicationItem.submenu = applicationMenu; menu.addItem(applicationItem)
+    let editItem = NSMenuItem(), editMenu = NSMenu(title: "Edit")
+    for (title, action, key) in [("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")] {
+      editMenu.addItem(NSMenuItem(title: title, action: Selector(action), keyEquivalent: key))
     }
+    editItem.submenu = editMenu; menu.addItem(editItem)
+    NSApp.mainMenu = menu
+  }
+
+  func startSearchService() {
+    guard serviceProcess?.isRunning != true, let fe = model.fePath else { return }
+    // An existing service is shared, never terminated by this app.
+    if FileManager.default.fileExists(atPath: SearchSocket.path + ".json") {
+      if let data = try? Data(contentsOf: URL(fileURLWithPath: SearchSocket.path + ".json")),
+         let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+         let pid = info["pid"] as? Int32, kill(pid, 0) == 0 { return }
+    }
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: fe)
+    process.arguments = ["serve", "--socket", SearchSocket.path, "--parent"] + (model.autoUpdate ? ["--live"] : [])
+    process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+    do { try process.run(); serviceProcess = process }
+    catch { model.errorMessage = "Search service could not start: \(error.localizedDescription)" }
+  }
+
+  @objc func switchWindowMode() {
+    model.windowMode.toggle()
+    UserDefaults.standard.set(model.windowMode, forKey: "windowMode")
+    model.recordInteraction("nav", trigger: model.windowMode ? "window" : "popup")
+    applyWindowMode(); showPanel()
+  }
+
+  func applyWindowMode() {
+    guard let panel else { return }
+    if model.windowMode {
+      panel.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+      panel.titleVisibility = .visible; panel.titlebarAppearsTransparent = false
+      panel.isFloatingPanel = false; panel.level = .normal; panel.hidesOnDeactivate = false
+      panel.collectionBehavior = [.managed, .fullScreenAuxiliary]
+      panel.setContentSize(NSSize(width: 960, height: 620)); panel.center()
+    } else {
+      panel.styleMask = [.nonactivatingPanel, .titled, .fullSizeContentView]
+      panel.titleVisibility = .hidden; panel.titlebarAppearsTransparent = true
+      panel.isFloatingPanel = true; panel.level = .floating
+      panel.hidesOnDeactivate = ProcessInfo.processInfo.environment["FE_KEEP_VISIBLE"] != "1"
+      panel.collectionBehavior = [.moveToActiveSpace]
+      panel.setContentSize(NSSize(width: 640, height: 420)); panel.center()
+    }
+    panel.minSize = NSSize(width: 640, height: 420)
+  }
+
+  func applyDockVisibility() {
+    NSApp.setActivationPolicy(model.showDockIcon ? .regular : .accessory)
   }
 
   func togglePanel() {
-    panel?.isVisible == true ? panel?.orderOut(nil) : showPanel()
+    if NSApp.isActive && panel?.isVisible == true && panel?.isOnActiveSpace == true {
+      panel?.orderOut(nil)
+    } else { showPanel() }
+  }
+
+  func installStatusItem() {
+    guard statusItem == nil else {return}
+    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    item.autosaveName="FindEverything.Search"
+    item.isVisible=true
+    let image=NSImage(systemSymbolName:"magnifyingglass.circle.fill",accessibilityDescription:"Find Everything")
+    image?.isTemplate=true
+    item.button?.image=image
+    item.button?.toolTip = "Find Everything"
+    let menu = NSMenu()
+    let show = NSMenuItem(title: "Show Find Everything", action: #selector(showPanel), keyEquivalent: "")
+    show.target = self; menu.addItem(show)
+    let mode = NSMenuItem(title: "Switch Window / Popup", action: #selector(switchWindowMode), keyEquivalent: "")
+    mode.target = self; menu.addItem(mode)
+    let folder = NSMenuItem(title: "Index Folder or Project…", action: #selector(chooseFolder), keyEquivalent: "")
+    folder.target = self; menu.addItem(folder)
+    menu.addItem(.separator())
+    let quit = NSMenuItem(title: "Quit Find Everything", action: #selector(quitApp), keyEquivalent: "")
+    quit.target = self; menu.addItem(quit)
+    item.menu = menu
+    statusItem = item
+  }
+
+  @objc func chooseFolder() { showPanel(); model.indexFolder() }
+  @objc func quitApp() { NSApp.terminate(nil) }
+
+  func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+    showPanel()
+    return true
+  }
+
+  func recordHotkeyStatus() {
+    let data: [String: Any] = ["pid": ProcessInfo.processInfo.processIdentifier,
+      "registrationStatus": Int(hotkeyRegistration), "handlerStatus": Int(hotkeyHandlerStatus),
+      "events": hotkeyEvents, "active": NSApp.isActive, "panelVisible": panel?.isVisible ?? false]
+    do {
+      try FileManager.default.createDirectory(at: FEDirs.support, withIntermediateDirectories: true)
+      let url = FEDirs.support.appendingPathComponent("hotkey-status.json")
+      try JSONSerialization.data(withJSONObject: data).write(to: url, options: .atomic)
+      try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    } catch { NSLog("Find Everything hotkey diagnostics: %@", error.localizedDescription) }
   }
 
   // Carbon global hotkey: Option+Space
@@ -1479,13 +2533,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var spec = EventTypeSpec(
       eventClass: OSType(kEventClassKeyboard),
       eventKind: UInt32(kEventHotKeyPressed))
-    InstallEventHandler(GetEventDispatcherTarget(), { _, _, _ -> OSStatus in
-      Task { @MainActor in AppDelegate.shared?.togglePanel() }
+    hotkeyHandlerStatus = InstallEventHandler(GetApplicationEventTarget(), { _, _, _ -> OSStatus in
+      Task { @MainActor in
+        guard let app = AppDelegate.shared else { return }
+        app.hotkeyEvents += 1
+        app.togglePanel()
+        app.recordHotkeyStatus()
+      }
       return noErr
-    }, 1, &spec, nil, nil)
+    }, 1, &spec, nil, &hotkeyHandler)
     let id = EventHotKeyID(signature: OSType(0x4645), id: 1) // 'FE'
-    RegisterEventHotKey(UInt32(kVK_Space), UInt32(optionKey), id,
-                        GetEventDispatcherTarget(), 0, &hotkeyRef)
+    if hotkeyHandlerStatus == noErr {
+      // Exclusive: without it macOS notifies every app that registered the same
+      // combination, so ⌥Space opened Find Everything and the other launcher.
+      hotkeyRegistration = RegisterEventHotKey(UInt32(kVK_Space), UInt32(optionKey), id,
+                          GetApplicationEventTarget(), OptionBits(kEventHotKeyExclusive), &hotkeyRef)
+    } else { hotkeyRegistration = hotkeyHandlerStatus }
+    if hotkeyHandlerStatus != noErr || hotkeyRegistration != noErr {
+      model.shortcutWarning = hotkeyRegistration == eventHotKeyExistsErr
+        ? "⌥Space is already owned by another app. Free it there or open Find Everything from the menu bar icon."
+        : "⌥Space is unavailable. Open Find Everything from the menu bar icon."
+    }
+    recordHotkeyStatus()
+  }
+
+  func applicationWillTerminate(_ notification: Notification) {
+    model.saveStartupView()
+    quickPreview.shutdown()
+    model.stopIndexing()
+    if serviceProcess?.isRunning == true { serviceProcess?.terminate() }
+    if let hotkeyRef { UnregisterEventHotKey(hotkeyRef) }
+    if let hotkeyHandler { RemoveEventHandler(hotkeyHandler) }
+    if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(
@@ -1494,26 +2573,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct RootView: View {
   @EnvironmentObject var m: Model
+  @Environment(\.colorScheme) var scheme
   var body: some View {
     Group {
       if m.setupNeeded { SetupView() } else { SearchView() }
     }
-    .frame(width: 640, height: 420)
-    .background(VisualEffect())
+    .frame(minWidth: 640, maxWidth: .infinity, minHeight: 420, maxHeight: .infinity)
+    .background(SearchPalette.forScheme(scheme).paper)
+    .preferredColorScheme(m.display.colorScheme)
+    .onChange(of:m.display.habitRanking) { _ in m.onQueryChange(m.query,force:true) }
     .cornerRadius(12)
     .shadow(radius: 20)
   }
-}
-
-struct VisualEffect: NSViewRepresentable {
-  func makeNSView(context: Context) -> NSVisualEffectView {
-    let v = NSVisualEffectView()
-    v.material = .hudWindow
-    v.blendingMode = .behindWindow
-    v.state = .active
-    return v
-  }
-  func updateNSView(_ v: NSVisualEffectView, context: Context) {}
 }
 
 extension Collection {
@@ -1526,5 +2597,5 @@ MainActor.assumeIsolated {
   let app = NSApplication.shared
   let delegate = AppDelegate()
   app.delegate = delegate
-  app.run()
+  withExtendedLifetime(delegate) { app.run() }
 }

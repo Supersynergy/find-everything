@@ -1,103 +1,123 @@
-# Find Everything — better than Spotlight
+# Find Everything
 
-Instant file search for Raycast that does **not** use Spotlight. Works with Spotlight indexing completely disabled — or just finds the files Spotlight never shows you (dotfiles, gitignored work, `~/Library` is intentionally out, caches are filtered).
+<img src="docs/release/images/hero.png" alt="Find Everything native macOS search window, showing synthetic design files in a saved Documents index" width="1600" height="1040">
 
-## Why
+**Search your files. Keep the index on your Mac.**
 
-Spotlight either consumes too much CPU/IO to keep enabled, or misses half your files. Find Everything keeps its own lightweight index — built once by `fd`, filtered by `rg`, ranked by `fzf`. Queries take ~100–150 ms even over millions of indexed paths.
+A native SwiftUI/AppKit file search app, a Bun-powered CLI and an optional Raycast extension. Search saved indexes by name, path, type and file properties, then open, preview or reveal the result without leaving the keyboard.
 
-## Features
+[**0.14.0 preview release**](https://github.com/Supersynergy/find-everything/releases/tag/v0.14.0) · [Release notes](docs/release/RELEASE-NOTES.md) · [Source licence](LICENSE) · [Third-party notices](THIRD-PARTY-NOTICES.md)
 
-- **Instant fuzzy search** — type, get results in ~30 ms. No Enter, no waiting.
-- **Persistent index per scope** — built once, auto-refreshed in the background when stale (`⌘R` forces a rebuild).
-- **Real Finder icons**, file size, modification date, folder badges.
-- **Two-line results** — file name + smart middle-truncated path. `⌘D` toggles a detail pane with full path, metadata and image preview.
-- **Scopes** — Home, Downloads, Documents, Applications, All (`/`), or your own comma-separated paths.
-- **Actions** — Open `↵`, Reveal in Finder, Open in Terminal `⌘T`, Copy Path `⌘C`, Copy File `⌘⌥C`, Rebuild Index `⌘R`.
-- **Sane defaults** — `node_modules`, `.git`, build outputs, venvs and tool caches are excluded automatically; extend via preferences.
+> **Preview, not a notarized macOS release.** The downloadable Apple Silicon build is locally signed, not signed with a trusted Developer ID or Apple-notarized. Gatekeeper may refuse it. We do not recommend disabling Gatekeeper, removing quarantine or changing privacy permissions to bypass this. Build from source with your own signing identity, or wait for a notarized release. Intel and older macOS versions have not been verified.
 
-## Requirements
+## What you can do
 
-macOS or Linux with [fd](https://github.com/sharkdp/fd), [fzf](https://github.com/junegunn/fzf) and [ripgrep](https://github.com/BurntSushi/ripgrep):
+- **Search a saved scope:** Documents, Downloads, Applications, a chosen folder, or a combined index. Indexing is explicit; a missing scope shows the available indexing actions.
+- **Narrow the result:** name/path/type columns, size and date filters, folders, favourites and explicit sorting.
+- **Use the keyboard:** search focus, result navigation, range selection, actions, Quick Look and Finder reveal.
+- **Keep large lists bounded:** paged results and capped caches instead of one view for every indexed file.
+- **Use the same engine elsewhere:** JSON CLI output, local Unix-socket service, MCP and optional Raycast commands.
 
-```bash
-brew install fd fzf ripgrep        # macOS
-sudo apt install fd-find fzf ripgrep   # Debian/Ubuntu
+Optional content search and semantic audio tools require additional checkout-based setup. Models and their runtime dependencies are **not** included in the preview archive.
+
+## Native views, light and dark
+
+| Light | Dark |
+| --- | --- |
+| <img src="docs/release/images/native-light.png" alt="Light appearance with six synthetic design-file results" width="1040" height="620"> | <img src="docs/release/images/native-dark.png" alt="Dark appearance of the same native search interface and synthetic results" width="1040" height="620"> |
+
+These images render the production SwiftUI/AppKit views with explicitly synthetic `/Demo/Documents` files. They are not captures of personal files, performance benchmarks or evidence of a completed accessibility audit.
+
+<details>
+<summary>Missing-index state</summary>
+
+<img src="docs/release/images/native-missing-index.png" alt="Missing Documents index with explicit Index Documents and Index Folder actions instead of a search result" width="1040" height="620">
+
+A missing index is not the same as no matches. The app exposes an indexing action and does not silently start a whole-disk scan.
+</details>
+
+## Get the preview
+
+The complete app archive requires **macOS 15 or later on Apple Silicon**; its native helper binaries target macOS 15. It was built and checked on macOS 15.8.2. The source app/CLI target alone is not the compatibility floor of the complete bundle.
+
+The [release page](https://github.com/Supersynergy/find-everything/releases/tag/v0.14.0) contains:
+
+- `FindEverything.app.zip`: Apple Silicon app with its bundled CLI and native helpers.
+- `SHA256SUMS.txt`: archive and manifest checksums.
+- `release.json`: version, architecture, signature limitations and archive digest.
+
+Download the files to the same directory and check them before opening anything:
+
+```sh
+shasum -a 256 -c SHA256SUMS.txt
 ```
 
-## Standalone CLI (`fe`)
+Checksums detect changed downloads; they do **not** substitute for trusted publisher signing or notarization. The remote `install.sh` requires its pinned publisher **and** Gatekeeper approval. It deliberately refuses an unapproved preview and preserves an existing installation. It does not select this prerelease as the latest stable download.
 
-The same engine runs as a standalone terminal tool on macOS and Linux — shareable with the Raycast extension via the same index.
+### Build from source
 
-```bash
-fe                    # interactive picker: type to search, enter opens, ^R rebuilds
-fe <query>            # quick search, ranked paths on stdout
-fe index --scope home # (re)build + shard an index
-fe status             # binaries + index health
+Prerequisites: macOS, Xcode Command Line Tools/Swift, Bun and the optional search tools you intend to use. The preview was built on Apple Silicon with Bun 1.4.4; other environments need their own verification. Install prerequisites using a package manager you trust. The app no longer downloads and executes missing tool archives itself.
+
+```sh
+git clone https://github.com/Supersynergy/find-everything.git
+cd find-everything
+bun install --frozen-lockfile
+# Optional external search helpers:
+brew install fd ripgrep fzf
+bun run check
+bash scripts/check-keyboard.sh
+bash app/bundle-app.sh
+# Choose an existing certificate fingerprint from security find-identity:
+FE_SIGN_IDENTITY="YOUR_40_CHARACTER_CERTIFICATE_FINGERPRINT" \
+  bash scripts/sign-app.sh 'app/Find Everything.app'
 ```
 
-Install: grab a binary from the [Releases](https://github.com/Supersynergy/find-everything/releases) page (`fe-darwin-arm64`, `fe-darwin-x64`, `fe-linux-x64`, `fe-linux-arm64`) and put it on your `PATH` as `fe`. Or build from source: `bun build --compile ./src/cli.ts --outfile fe`.
+This creates `app/Find Everything.app`. Signing never falls back to ad-hoc, and it will not silently rotate an installed identity. See [the signing script](scripts/sign-app.sh).
 
-## Native app (macOS)
+For a local update from a checkout, `bash install.sh --local` makes an app rollback backup and uses the chosen signing identity. It also installs the CLI link, shell completion and the app's login agent. It does **not** opt you into a live indexing daemon or replace existing watcher/maintenance scopes. No installer is run merely by cloning or reading this page.
 
-A standalone Raycast-style panel — no Raycast needed. Borderless floating window, global `⌥Space` hotkey, two-line results with Finder icons, and a `⌘K` action panel.
+## CLI quick start
 
-```bash
-./install.sh        # app → ~/Applications, fe → ~/.local/bin, no sudo
+Create one named index for a folder you deliberately choose:
+
+```sh
+bun run src/cli.ts index --path "$HOME/Documents" --name work
+bun run src/cli.ts search 'report' --index work --json
+bun run src/cli.ts search 'ext:pdf size:>10m' --index work --json
+bun run src/cli.ts indexes --json
 ```
 
-On first launch the app checks for `fe`/`fd`/`rg`/`fzf` and offers to download whatever is missing straight from GitHub releases into `~/Library/Application Support/FindEverything/bin` — no Homebrew, no admin rights.
+Once installed, replace `bun run src/cli.ts` with `fe`. Use `fe --help` for the command list. `fe mcp` provides the local MCP interface; the native app normally uses a permission-restricted Unix socket rather than an exposed remote service.
 
-**Keyboard** — everything is reachable without the mouse:
+### Large indexes
 
-| Key | Action |
-|---|---|
-| `⌥Space` | toggle panel (global) |
-| `↑` `↓` `^N` `^P` `PgUp` `PgDn` `⌘↑` `⌘↓` `Home` `End` | navigate |
-| `↵` | open |
-| `⌘↵` | open containing folder |
-| `⌥↵` | reveal in Finder |
-| `⌘K` / `Tab` | action panel — type to filter, `→` enters submenus (Open With…, Switch Scope), `←`/`⎋` steps back |
-| `⌘D` / `⌘I` | detail pane (path, size, date, image + text preview) |
-| `⌘C` `⌘⇧C` `⌘⌥C` `⌘⌥⇧C` | copy path / name / file / contents |
-| `⌘T` `⌘Y` `⌘O` `⌘I` | Terminal / Quick Look / reveal / Get Info |
-| `⌘P` | pin to top |
-| `⌘1`–`⌘6` `⌘⌥←` `⌘⌥→` | scopes |
-| `⌘⌫` `⌘R` `⌘W` `⌘Q` `⎋` | trash / rebuild / hide / quit / back |
-| `⌘/` | shortcuts cheat-sheet (also the `?` button) |
+The flat path index is streamed to disk with backpressure. Version 0.14.0 replaces the former 1-GiB output cutoff with a finite **8-GiB maximum**, limited further by the free disk space available at the start, leaving a 256-MiB reserve in that initial budget. Timeouts, path-length checks and atomic replacement remain in place. This does not promise an index of every protected macOS file; permissions, excludes, scan time and available disk still apply.
 
-Results are grouped like Raycast: **Pinned** → **Recently Used** → **Applications** → **Files & Folders**.
+A failed rebuild must not publish a partial index over the previous snapshot. Creating an All (`/`) index remains an explicit action, not something the release process runs on your Mac.
 
-Mouse works too: hover selects, double-click opens, rows **drag** as file references, right-click opens the same actions as a context menu (incl. Open With, Duplicate, Compress, Share), and the `⋯` button in the footer opens the action panel.
+## Local data and privacy
 
-**Habits** — files you open land in "Recently Opened" (empty query) and rank higher next time. `⌘P` pins files above everything. Paste or type a full path (`/…` or `~/…`) to open it directly. History lives in `~/Library/Application Support/FindEverything/opens.json`, pins in `pins.json`.
+Source review found no hosted product accounts, advertising or product analytics in this scope. This is not a complete runtime-network audit. The application stores file paths, metadata, saved scopes, favourites, preferences and optional ranking history locally:
 
-## Usage
+| Location | Contents |
+| --- | --- |
+| `~/.cache/hypersearch` | Derived indexes, search databases, socket metadata and logs |
+| `~/.config/find-everything` | Index profiles and local signing-identity pin |
+| `~/Library/Application Support/FindEverything` | Favourites, ranking/warm-view data, helpers and app rollback backups |
+| macOS user defaults for `com.supersynergy.findeverything` | Display, scope and interaction preferences |
 
-Open the **Find Everything** command, type at least 2 characters. Switch scope in the dropdown. Recommended: assign your preferred hotkey in Raycast Settings → Extensions → Find Everything.
+Index deletion and removing a saved profile are not deletion of the original files. The normal startup/search path does not require a cloud account. User-requested external actions may open a browser; optional model setup downloads from Hugging Face/npm and needs its own licence review. GitHub hosts source and releases. Installers/package managers contact their own upstreams when you deliberately run them.
 
-### Query operators
+For uninstall/cleanup, first quit the app and stop only the Find Everything agents you installed. Back up favourites, preferences and rollback copies you want to keep. Remove the app/CLI/login-agent entries and only then the specific local data directories above if you want a complete reset. Removing those directories discards saved preferences and derived indexes and is not part of a normal update. Never paste unredacted file lists, local paths or socket tokens into a public issue.
 
-| Operator | Example | Effect |
-|---|---|---|
-| `ext:` / `*.ext` | `invoice ext:pdf` · `*.md` | filter by extension (`;` lists: `ext:md;txt`) |
-| `in:` / bare `in` | `invoice in downloads` · `in:~/code` | scope to a folder |
-| `type:` | `type:image screenshot` | doc · image · video · audio · zip · code · app |
-| `!` | `readme !node` | exclude matches |
-| `a\|b` | `invoice\|rechnung` | OR alternation |
-| `"…"` | `"release notes"` | exact phrase |
-| `sort:` | `readme sort:new` | name · new · old · big · small |
-| `size:` | `size:>50m` | filter by file size (`>`/`<`, k/m/g) |
-| `dm:` | `dm:today report` | modified within today · week · `<n>d` |
+## Verification and limitations
 
-`size:`/`dm:`/`sort:` post-filter the visible top results — the flat index stores paths only, which is what keeps it at ~30 ms.
+Release checks cover project tests/typechecking, native model/navigation/table/presentation tests, bundle signature and version consistency, archive checksums, included notices and product-image presence. Independent report-only passes covered data preservation, security boundaries, licences/privacy, resource bounds and UI source states. These are scoped checks, not a security or legal certification.
 
-## How it works
+Manual screen/keyboard/VoiceOver verification was unavailable because macOS Accessibility/Screen Recording permissions were not granted. Synthetic offscreen rendering does not replace it. Long-running memory/recovery behaviour, Intel, older macOS, full dependency-advisory checks and a complete third-party legal review remain unverified. See [the register](COMPLIANCE.md).
 
-1. `fd` scans the scope once into `~/.cache/hypersearch/index-<scope>.txt` (stale-while-revalidate).
-2. The index is split into 8 shards; `rg` scans them **in parallel**, capped per shard — ~30 ms typical, worst-case queries stay ~30 ms instead of seconds.
-3. `fzf --filter` fuzzy-ranks the candidates; results whose basename contains all query terms float to the top.
+## Contributing
 
-## License
+Keep changes focused and run `bun run check`; native changes also need `bash scripts/check-keyboard.sh`. Include a regression test and explain any new network access, stored data or background work. Do not commit credentials, index contents, personal screenshots or local acceptance receipts.
 
-MIT
+[Report a reproducible bug](https://github.com/Supersynergy/find-everything/issues) with the version, macOS version and a privacy-clean example. Source is MIT; bundled components retain their own terms.

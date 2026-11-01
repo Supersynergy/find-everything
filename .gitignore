@@ -1,5 +1,13 @@
 node_modules
 dist
 dist-bin
+.env
+.env.*
+!.env.example
+release-artifacts
 app/.build
 app/Find Everything.app
+.*.bun-build
+.sis/
+runtime/model/
+runtime/ready.json
