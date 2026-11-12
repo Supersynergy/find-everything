@@ -54,31 +54,77 @@ Save searches with their folder/project scope, pin favourites, revisit search hi
 
 ### More than a search box
 
-| Capability | What it does |
-| --- | --- |
-| **Saved searches + favourites** | Keep a query and its scope; combine `favorites:true` with other filters. |
-| **Optional local learning** | Successful opens can improve relevance. Opt out or reset it; explicit sorts retain priority. |
-| **Quiet live updates** | The macOS file journal updates changed paths. Journal gaps are reported, not hidden behind an automatic full rescan. |
-| **Continuous result lists** | Scroll the indexed match set through a virtual native table with bounded caches—not a separate view for every file. |
-| **Visible index preparation** | First launch schedules All once; later rebuilds are explicit. Pause/resume or cancel in the footer. Scanning shows a count, not an invented percentage. |
-| **Reusable indexes** | Combine existing indexes without another filesystem traversal. |
-| **Your preferred view** | Light/dark/system appearance, text size, density, columns, visibility filters and preview options. |
-| **Useful automation** | JSON output, exact indexed-match counts, stable pages and coverage warnings for scripts and agents. |
+<details>
+<summary><strong>📋 Show 8 entries</strong></summary>
+
+- **Saved searches + favourites**<br>
+  What it does: Keep a query and its scope; combine `favorites:true` with other filters.
+
+- **Optional local learning**<br>
+  What it does: Successful opens can improve relevance. Opt out or reset it; explicit sorts retain priority.
+
+- **Quiet live updates**<br>
+  What it does: The macOS file journal updates changed paths. Journal gaps are reported, not hidden behind an automatic full rescan.
+
+- **Continuous result lists**<br>
+  What it does: Scroll the indexed match set through a virtual native table with bounded caches—not a separate view for every file.
+
+- **Visible index preparation**<br>
+  What it does: First launch schedules All once; later rebuilds are explicit. Pause/resume or cancel in the footer. Scanning shows a count, not an invented percentage.
+
+- **Reusable indexes**<br>
+  What it does: Combine existing indexes without another filesystem traversal.
+
+- **Your preferred view**<br>
+  What it does: Light/dark/system appearance, text size, density, columns, visibility filters and preview options.
+
+- **Useful automation**<br>
+  What it does: JSON output, exact indexed-match counts, stable pages and coverage warnings for scripts and agents.
+
+</details>
+
 
 [**Full capability guide, prerequisites and source references →**](docs/FEATURES.md)
 
 ## One line, many ways to find it
 
-| You want… | Try… | Preparation |
-| --- | --- | --- |
-| A phrase inside a document | `content:"quarterly revenue" ext:pdf` | Source checkout + explicit document-text index |
-| Invoice PDFs, without drafts | `name:invoice ext:pdf !draft` | Saved path index |
-| PDFs or Markdown in Downloads | `ext:pdf;md in:downloads` | An index containing Downloads |
-| Large files changed this week | `size:>10m dm:7d sort:big` | Cached size/date properties |
-| Your favourite PDFs | `favorites:true ext:pdf` | Pin files first |
-| A supported German file phrase | `(PDFs größer als 10 MB)` | Cached size properties |
-| Mono sounds under a second | `audio: duration:<1s channels:1` | Extract audio metadata |
-| Sounds by description | `(kurze düstere Lasersounds)` | Optional sound model + analysed audio |
+<details>
+<summary><strong>📋 Show 8 entries</strong></summary>
+
+- **A phrase inside a document**<br>
+  Try…: `content:"quarterly revenue" ext:pdf`<br>
+  Preparation: Source checkout + explicit document-text index
+
+- **Invoice PDFs, without drafts**<br>
+  Try…: `name:invoice ext:pdf !draft`<br>
+  Preparation: Saved path index
+
+- **PDFs or Markdown in Downloads**<br>
+  Try…: `ext:pdf;md in:downloads`<br>
+  Preparation: An index containing Downloads
+
+- **Large files changed this week**<br>
+  Try…: `size:>10m dm:7d sort:big`<br>
+  Preparation: Cached size/date properties
+
+- **Your favourite PDFs**<br>
+  Try…: `favorites:true ext:pdf`<br>
+  Preparation: Pin files first
+
+- **A supported German file phrase**<br>
+  Try…: `(PDFs größer als 10 MB)`<br>
+  Preparation: Cached size properties
+
+- **Mono sounds under a second**<br>
+  Try…: `audio: duration:<1s channels:1`<br>
+  Preparation: Extract audio metadata
+
+- **Sounds by description**<br>
+  Try…: `(kurze düstere Lasersounds)`<br>
+  Preparation: Optional sound model + analysed audio
+
+</details>
+
 
 **Document contents require explicit preparation.** A normal filename/path query does not search document text; use `content:` for that. No OCR is provided. Semantic search means optional **audio** similarity, not semantic document search. Coverage remains limited by chosen roots, supported formats, exclusions, permissions and preparation.
 
@@ -104,9 +150,9 @@ The filename filter excludes a fixture whose **folder** contains “Invoice” b
 
 A missing selected scope exposes indexing actions. Separately, the first app launch schedules All once using its configured roots and exclusions. Pause, resume or cancel from the visible footer. Canceling a scan keeps the prior valid index; canceling lookup preparation keeps the newly completed path snapshot so preparation can resume.
 
-| Scanning: count, no invented percentage | Preparing the lookup: measured progress |
-| --- | --- |
-| ![Synthetic native All-index scan footer with count and pause/cancel controls.](./docs/release/images/indexing-scan.png) | ![Synthetic native preparation footer with a measured progress bar and pause/cancel controls.](./docs/release/images/indexing-progress.png) |
+- **![Synthetic native All-index scan footer with count and pause/cancel controls.](./docs/release/images/indexing-scan.png)**<br>
+  Preparing the lookup: measured progress: ![Synthetic native preparation footer with a measured progress bar and pause/cancel controls.](./docs/release/images/indexing-progress.png)
+
 
 ![Synthetic paused indexing footer with a resume action.](./docs/release/images/indexing-paused.png)
 
@@ -185,12 +231,23 @@ A failed or canceled scan must not publish a partial path index over the previou
 
 Source review found no hosted product accounts, advertising or product analytics in this scope. This is not a complete runtime-network audit. The application stores file paths, metadata, saved scopes, favourites, preferences and optional ranking history locally:
 
-| Location | Contents |
-| --- | --- |
-| `~/.cache/hypersearch` | Derived indexes, search databases, optional unencrypted document-text caches, socket metadata and logs |
-| `~/.config/find-everything` | Index profiles and local signing-identity pin |
-| `~/Library/Application Support/FindEverything` | Favourites, ranking/warm-view data, helpers and app rollback backups |
-| macOS user defaults for `com.supersynergy.findeverything` | Display, scope and interaction preferences |
+<details>
+<summary><strong>📋 Show 4 entries</strong></summary>
+
+- **`~/.cache/hypersearch`**<br>
+  Contents: Derived indexes, search databases, optional unencrypted document-text caches, socket metadata and logs
+
+- **`~/.config/find-everything`**<br>
+  Contents: Index profiles and local signing-identity pin
+
+- **`~/Library/Application Support/FindEverything`**<br>
+  Contents: Favourites, ranking/warm-view data, helpers and app rollback backups
+
+- **macOS user defaults for `com.supersynergy.findeverything`**<br>
+  Contents: Display, scope and interaction preferences
+
+</details>
+
 
 Index deletion and removing a saved profile are not deletion of the original files. The normal startup/search path does not require a cloud account. User-requested external actions may open a browser; optional model setup downloads from Hugging Face/npm and needs its own licence review. GitHub hosts source and releases. Installers/package managers contact their own upstreams when you deliberately run them.
 
