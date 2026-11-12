@@ -6,7 +6,7 @@ Local-first file search for macOS. Find a filename across folders, combine preci
 
 **New in 0.3.0:** explicitly index document contents, then search with `content:"quarterly revenue"`. The first app launch also schedules an **All** path index once, with visible progress and pause/cancel controls.
 
-[**Get the 0.3.0 preview**](https://github.com/Supersynergy/find-everything/releases/tag/v0.3.0) · [Features](#features) · [Search examples](#one-line-many-ways-to-find-it) · [Build from source](#build-from-source) · [Release notes](docs/release/RELEASE-NOTES.md)
+[**Get the 0.3.0 preview**](https://github.com/Supersynergy/find-everything/releases/tag/v0.3.0) · [Features](#features) · [Search examples](#one-line-many-ways-to-find-it) · [Build from source](#build-from-source) · [CLI](#cli-quick-start) · [Privacy](#local-data-and-privacy) · [Release notes](docs/release/RELEASE-NOTES.md)
 
 > **Apple Silicon preview — not notarized.** The downloadable build is locally signed, not signed with a trusted Developer ID or Apple-notarized. Gatekeeper may refuse it. We do not recommend disabling Gatekeeper, removing quarantine or changing privacy permissions to bypass this. Build from source with your own signing identity, or wait for a notarized release. Intel and older macOS versions have not been verified.
 
