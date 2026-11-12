@@ -18,7 +18,7 @@ import {learningContext} from './search-ranking';
 import {createInterface} from 'node:readline';
 import {searchContents,contentPath} from './content-search';
 
-export const VERSION = "0.3.3";
+export const VERSION = "0.3.4";
 const CACHE_TTL_MS = 300000, CACHE_MAX_ENTRIES = 256, CACHE_MAX_BYTES = 16 * 1024 * 1024;
 function learningStamp(){try{const s=fs.statSync(learningFile());return `${s.mtimeMs}:${s.size}:${Math.floor(Date.now()/3600000)}`;}catch(e){if(e.code==='ENOENT')return 'none';throw e;}}
 

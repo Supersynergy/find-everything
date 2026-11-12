@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.4 — 2026-11-13
+
+- Coalesce pending events by path before checking the queue budget. More than 20,000 repeated notifications for a few paths no longer discard the replay; the finite limit still applies to 20,000 distinct pending paths per root.
+- Preserve all flags and the union of target scopes. An unscoped notification continues to apply to every matching scope when combined with scoped duplicates. Add a 65,536-duplicate replay regression across two saved scopes.
+
 ## 0.3.3 — 2026-11-13
 
 - Use indexed, case-sensitive directory ranges when applying subtree deletions. Avoid scanning every directory for each deleted subtree; preserve Unicode spelling and sibling boundaries.

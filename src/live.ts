@@ -29,7 +29,7 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
   let child: ReturnType<typeof spawn>, lines: ReturnType<typeof createInterface>;
   let scopeList: ReturnType<typeof indexStatus> = [];
   const siblings = new Map<string,Set<string>>();
-  const queue = new Map<string, { uuid?: string; cursor?: string; gap?: string; events: Event[] }>();
+  const queue = new Map<string, { uuid?: string; cursor?: string; gap?: string; events: Map<string,Event> }>();
   const stop = () => { if (stopped) return; stopped = true; clearTimeout(timer); clearTimeout(jobsTimer); child?.kill("SIGKILL"); lines?.close(); catalogWatch?.close(); indexWatch?.close(); if (!running) { db.close(); release(); } };
   process.once("exit",stop);
   let catalogWatch: fs.FSWatcher, indexWatch: fs.FSWatcher;
@@ -94,8 +94,7 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
       for (const [root, message] of batch) {
         const affected = scopeList.filter(s => s.paths.includes(root));
         const staged: {scope:typeof scopeList[number];changes:Map<string,{present:number;tree:number}>;gap?:string}[] = [];
-        const unique = new Map<string,Event>();
-        for (const event of message.events) { const previous=unique.get(event.path); unique.set(event.path,{...event,scopes:event.scopes && previous?.scopes ? [...new Set([...event.scopes,...previous.scopes])] : event.scopes,flags:event.flags | (previous?.flags || 0)}); }
+        const unique = message.events;
         for (const scope of affected) {
           const deadline = performance.now()+5000;
           const changes = new Map<string,{present:number;tree:number}>();
@@ -174,7 +173,7 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
             if (changes.size) db.query("UPDATE scopes SET revision=?,lastChange=? WHERE name=?").run(revision,new Date().toISOString(),scope.name);
             if (gap) problem(scope.name,gap);
           }
-          if ((staged.some(s => s.changes.size || s.gap) || message.events.some(e => e.flags & 16)) && message.cursor && message.uuid) db.query("INSERT INTO streams VALUES (?,?,?) ON CONFLICT(root) DO UPDATE SET uuid=excluded.uuid,cursor=excluded.cursor WHERE cursor<>excluded.cursor OR uuid<>excluded.uuid").run(root,message.uuid,message.cursor);
+          if ((staged.some(s => s.changes.size || s.gap) || [...message.events.values()].some(e => e.flags & 16)) && message.cursor && message.uuid) db.query("INSERT INTO streams VALUES (?,?,?) ON CONFLICT(root) DO UPDATE SET uuid=excluded.uuid,cursor=excluded.cursor WHERE cursor<>excluded.cursor OR uuid<>excluded.uuid").run(root,message.uuid,message.cursor);
         })();
         for (const {scope,changes} of staged) {
           if (changes.size) {
@@ -228,8 +227,14 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
           // previous helper left behind, keep gap/overlay problems.
           for (const s of scopeList) if (s.paths.includes(m.root)) db.query("UPDATE scopes SET problem=NULL WHERE name=? AND problem LIKE 'Event stream stopped (%'").run(s.name);
         }
-        const previous = queue.get(m.root), events = [...(previous?.events || []),...(m.events || [])];
-        if (events.length > 20000) { events.length=0; m.gap="Event backlog exceeds budget; explicit reconciliation required"; }
+        const previous = queue.get(m.root), events = previous?.events || new Map<string,Event>();
+        // Replays often repeat metadata events thousands of times for one path.
+        // Bound distinct pending paths, retaining every flag and target scope.
+        for(const event of (m.events || []) as Event[]){
+          const old=events.get(event.path);
+          events.set(event.path,{...event,flags:event.flags|(old?.flags||0),scopes:old ? (old.scopes&&event.scopes ? [...new Set([...old.scopes,...event.scopes])] : undefined) : event.scopes});
+        }
+        if (events.size > 20000) { events.clear(); m.gap="Event backlog exceeds budget; explicit reconciliation required"; }
         queue.set(m.root,{uuid:m.uuid,cursor:m.cursor || previous?.cursor,gap:m.gap || previous?.gap,events});
         // Schedule from the first event; continuous filesystem activity must not starve commits.
         if (!previous) timer=setTimeout(() => void flush(),delay);

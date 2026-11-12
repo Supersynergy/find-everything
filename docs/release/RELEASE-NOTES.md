@@ -1,4 +1,6 @@
-# Find Everything 0.3.3 · Apple Silicon preview
+# Find Everything 0.3.4 · Apple Silicon preview
+
+Repeated notifications for the same path no longer exhaust the live-event queue. Coalesce flags and scope targets before enforcing its 20,000-distinct-path bound, including unscoped notifications that apply to every saved scope. A regression exercises 65,536 repeated events across two scopes.
 
 Apply large journals with up to one million changed paths. Indexed directory ranges avoid a full directory-table scan for every subtree deletion. Live updates preserve CR/LF filenames; the flat scan format still reports these as skipped until recovered through a live event. Each saved scope receives its own processing budget. See the [predicate benchmark](../BENCHMARKS-2026-11-13.md) for the isolated performance comparison and its limits.
 
