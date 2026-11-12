@@ -208,9 +208,9 @@ export function searchMedia(query: string, index: string, pq: ParsedQuery, limit
   try {
     const snapshotCurrent = db.query("SELECT value FROM meta WHERE key='indexStamp'").get()?.value === stamp(index);
     const constraints = pq.constraints.map(c => ({ re: new RegExp(c.pattern, "i"), negate: c.negate }));
-    const groups = pq.fuzzy.map(t => t.replace(/^'/, "").split("|").map(s => s.toLowerCase()));
+    const groups = pq.fuzzy.map(t => (t.startsWith("'")?[t.slice(1)]:t.split("|")).map(s => s.toLowerCase()));
     const favorites=pq.favorites?new Set(pq.favorites):null;
-    const matchesPath = (p: string) => (!favorites||favorites.has(p))&&!omitted(p,pq.omit)&&constraints.every(c => c.re.test(p) !== c.negate) && groups.every(g => g.some(s => p.toLowerCase().includes(s)));
+    const matchesPath = (p: string) => {const normalized=p.normalize('NFC');return (!favorites||favorites.has(p))&&!omitted(p,pq.omit)&&constraints.every(c => c.re.test(normalized) !== c.negate) && groups.every(g => g.some(s => normalized.toLowerCase().includes(s)));};
     const fields = [...new Set(pq.mediaFilters.map(f => f.field))];
     const baseSql = "SELECT path,status," + fields.join(",") + " FROM files WHERE status<>'excluded'";
     const baseRows = db.query(baseSql).all().filter(r => matchesPath(r.path) && delta.visible(r.path));

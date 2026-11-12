@@ -132,10 +132,18 @@ export function effectiveOptions(scope: Scope, opts: EngineOpts = {}): EngineOpt
   validateName(scope);
   const saved = BUILTIN_SCOPES.includes(scope) ? undefined : profile(scope);
   if (!BUILTIN_SCOPES.includes(scope) && !saved && !opts.paths) throw new Error(`Unknown index: ${scope}`);
-  const result = { includeHidden: true, includeIgnored: false, indexMaxAgeMinutes: "60", ...saved, ...opts };
+  const metadata = BUILTIN_SCOPES.includes(scope) && fs.existsSync(metaPathFor(scope)) ? JSON.parse(fs.readFileSync(metaPathFor(scope),'utf8')).indexOptions : undefined;
+  const result = { includeHidden: true, includeIgnored: false, indexMaxAgeMinutes: "60", ...metadata, ...saved, ...opts };
+  if (result.exhaustive) { result.includeHidden = true; result.includeIgnored = true; }
   const age = Number(result.indexMaxAgeMinutes);
   if (!Number.isFinite(age) || age < 1 || age > 10080) throw new Error("Index max age must be 1–10080 minutes");
   return result;
+}
+
+export function scanExcludes(scope: Scope, opts: EngineOpts): string[] {
+  return [...(opts.exhaustive ? [] : BASE_EXCLUDES),
+    ...(opts.extraExcludes || '').split(',').map(s=>s.trim()).filter(Boolean),
+    ...(scope === 'all' ? opts.exhaustive ? ['/dev','/proc','/sys','/System/Volumes/Data'] : ALL_EXCLUDES : [])];
 }
 
 export function scopePaths(scope: Scope, opts: EngineOpts): string[] {
@@ -175,6 +183,7 @@ export const shardDirFor = (scope: Scope) => path.join(INDEX_DIR, `index-${valid
 const metaPathFor = (scope: Scope) => path.join(INDEX_DIR, `index-${validateName(scope)}.json`);
 const signature = (scope: Scope, opts: EngineOpts) => createHash("sha256").update(JSON.stringify([
   2, scopePaths(scope, opts), opts.includeHidden, opts.includeIgnored, opts.extraExcludes || "", BASE_EXCLUDES,
+  ...(opts.exhaustive ? ['exhaustive',scanExcludes(scope,opts)] : []),
 ])).digest("hex");
 export const INDEX_TIMEOUT_MS = 120_000;
 export const SEARCH_TIMEOUT_MS = 10_000;
@@ -268,15 +277,8 @@ export function rebuildIndex(scope: Scope, opts: EngineOpts, monitor?: { progres
     const dirs = scopePaths(scope, opts);
     if (dirs.length === 0) throw new Error(`No folders configured for ${scope}; use fe index --path FOLDER --name NAME`);
     for (const dir of dirs) if (!fs.statSync(dir).isDirectory()) throw new Error(`Not a folder: ${dir}`);
-    const excludes = [
-      ...BASE_EXCLUDES,
-      ...(opts.extraExcludes || "")
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean),
-      ...(scope === "all" ? ALL_EXCLUDES : []),
-    ];
-    const args = ["--absolute-path", "--color=never", "--print0", "--threads", "2"];
+    const excludes = scanExcludes(scope, opts);
+    const args = ["--absolute-path", "--color=never", "--print0", "--show-errors", "--threads", "2"];
     if (opts.includeHidden) args.push("--hidden");
     if (opts.includeIgnored) args.push("--no-ignore");
     for (const e of excludes) args.push("--exclude", e);
@@ -293,6 +295,7 @@ export function rebuildIndex(scope: Scope, opts: EngineOpts, monitor?: { progres
     const patterns = excludes.flatMap(pattern => {
       const clean = pattern.replace(/^\/+|\/+$/g, "");
       if (!clean) return [];
+      if (pattern.startsWith('/')) return dirs.flatMap(root=>['-path',path.join(root,clean)]);
       return [clean.includes("/") ? "-path" : "-name", clean.includes("/") ? `*/${clean}` : clean];
     });
     if (!opts.includeHidden) patterns.push("-name", ".*");
@@ -326,7 +329,12 @@ export function rebuildIndex(scope: Scope, opts: EngineOpts, monitor?: { progres
     try { await Promise.all([pipeline(child.stdout, normalizer, out, { signal: monitor?.signal }), exited]); }
     finally { if (timer) clearTimeout(timer); if (progressTimer) clearInterval(progressTimer); if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }
     monitor?.progress(stats);
-    fs.writeFileSync(metaTmp, JSON.stringify({ signature: signature(scope, opts), ...stats, paths: dirs, scanStartedAt, indexedAt: new Date().toISOString() }), { mode: 0o600 });
+    const provenanceWarnings = [
+      ...(stderr.trim() ? ['File scanner reported inaccessible paths or other errors; coverage is incomplete.'] : []),
+      ...(stats.skipped ? [`Skipped ${stats.skipped} paths containing line breaks; coverage is incomplete.`] : []),
+    ];
+    const indexOptions={includeHidden:opts.includeHidden,includeIgnored:opts.includeIgnored,extraExcludes:opts.extraExcludes,indexMaxAgeMinutes:opts.indexMaxAgeMinutes,exhaustive:opts.exhaustive};
+    fs.writeFileSync(metaTmp, JSON.stringify({ signature: signature(scope, opts), ...stats, paths: dirs, indexOptions, scanStartedAt, indexedAt: new Date().toISOString(), provenanceWarnings }), { mode: 0o600 });
     // Finish both files before publishing the complete flat snapshot. Search preparation
     // is a separately resumable derived-cache stage, not an unfinished directory scan.
     fs.renameSync(tmp, file);
@@ -380,6 +388,7 @@ export function indexStatus() {
     const opts = effectiveOptions(name);
     return { name, paths: scopePaths(name, opts), options: opts, exists: !!stat, bytes: stat?.size || 0,
       indexedAt: stat?.mtime.toISOString() || null, scanStartedAt:meta.scanStartedAt || null, count: meta.count ?? null, skipped: meta.skipped || 0,
+      exclusions: scanExcludes(name,opts),
       provenanceWarnings: Array.isArray(meta.provenanceWarnings)?meta.provenanceWarnings:[],
       configurationChanged: !!stat && meta.signature !== signature(name, opts),
       stale: !stat || meta.signature !== signature(name, opts) || Date.now() - stat.mtimeMs > Number(opts.indexMaxAgeMinutes) * 60_000 };
@@ -413,7 +422,7 @@ export interface ParsedQuery {
   content?: string;
   mediaFilters: NumericFilter[];
   fuzzy: string[]; // fzf filter terms ('exact, a|b, plain)
-  constraints: { pattern: string; negate: boolean; literal?:string; field?:'name'; suffixes?:string[]; alternatives?:string[] }[];
+  constraints: { pattern: string; negate: boolean; literal?:string; field?:'name'|'folder'; prefix?:boolean; suffixes?:string[]; alternatives?:string[] }[];
   sort?: string;
   sizeFilter?: { op: string; bytes: number; maxBytes?:number };
   dmFilter?: { days: number };
@@ -445,7 +454,7 @@ const DM_DAYS: Record<string, number> = {
   month: 31, thismonth: 31, year: 366, thisyear: 366,
 };
 export function parseQuery(q: string): ParsedQuery {
-  q = normalizeQuery(q);
+  q = normalizeQuery(q).normalize('NFC');
   const pq: ParsedQuery = { fuzzy: [], constraints: [], mediaFilters: [] };
   q = q.replace(/sound:("(?:\\.|[^"\\\n])+")/g, (_, encoded) => {
     const description=JSON.parse(encoded);
@@ -466,7 +475,7 @@ export function parseQuery(q: string): ParsedQuery {
     if (IN_ALIASES[lv])
       return `/${IN_ALIASES[lv]}/`;
     if (v.startsWith("/") || v.startsWith("~"))
-      return v.startsWith("~") ? HOME + v.slice(1) : v;
+      return (v.startsWith("~") ? HOME + v.slice(1) : v).replace(/\/+$/,'')+'/';
     return `/${lv}/`;
   };
   for (let i = 0; i < toks.length; i++) {
@@ -474,7 +483,7 @@ export function parseQuery(q: string): ParsedQuery {
     if (tok.startsWith('"')) {pq.fuzzy.push("'"+unquote(tok));continue;}
     // bare ` in X` keyword (Raycast style): `invoice in downloads`
     if ((tok === "in" || tok === "in:") && toks[i + 1]) {
-      const literal=inTarget(unquote(toks[++i]));pq.constraints.push({ pattern: reEsc(literal), literal, negate: false });
+      const value=unquote(toks[++i]),literal=inTarget(value);pq.constraints.push({ pattern: reEsc(literal), literal, field:'folder', prefix:value.startsWith('/')||value.startsWith('~'), negate: false });
       continue;
     }
     if (tok.startsWith("!") && tok.length > 1) {
@@ -482,7 +491,7 @@ export function parseQuery(q: string): ParsedQuery {
       continue;
     }
     if (tok.startsWith("*." ) && /^[\w-]+$/.test(tok.slice(2))) {
-      pq.constraints.push({ pattern: `\\.${tok.slice(2)}$`,suffixes:['.'+tok.slice(2).toLowerCase()], negate: false });
+      pq.constraints.push({ pattern: `\\.${tok.slice(2)}\\/?$`,suffixes:['.'+tok.slice(2).toLowerCase()], negate: false });
       continue;
     }
     if(/^content:$/i.test(tok))throw new Error('content: requires a literal word or quoted phrase');
@@ -518,14 +527,14 @@ export function parseQuery(q: string): ParsedQuery {
         if(!parts.length||parts.length!==lv.split(';').length)throw new Error('Invalid extension filter');
         if (parts.length)
           pq.constraints.push({
-            pattern: `\\.(${parts.map(reEsc).join("|")})$`,
+            pattern: `\\.(${parts.map(reEsc).join("|")})\\/?$`,
             suffixes:parts.map(p=>'.'+p),
             negate: false,
           });
         continue;
       }
       if (k === "in") {
-        const literal=inTarget(v);pq.constraints.push({ pattern: reEsc(literal),literal, negate: false });
+        const literal=inTarget(v);pq.constraints.push({ pattern: reEsc(literal),literal, field:'folder', prefix:v.startsWith('/')||v.startsWith('~'), negate: false });
         continue;
       }
       if (k === "name") {
@@ -536,7 +545,7 @@ export function parseQuery(q: string): ParsedQuery {
       if (k === "type" || k === "is" || k === "kind") {
         if (TYPE_MACROS[lv]) {
           pq.constraints.push({
-            pattern: `\\.(${TYPE_MACROS[lv]})$`,
+            pattern: `\\.(${TYPE_MACROS[lv]})\\/?$`,
             suffixes:TYPE_MACROS[lv].split('|').flatMap(p=>{const m=p.match(/^(.*)([a-z])\?(.*)$/);return m?[m[1]+m[3],m[1]+m[2]+m[3]]:[p];}).map(p=>'.'+p),
             negate: false,
           });

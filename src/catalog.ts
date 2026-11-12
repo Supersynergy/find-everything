@@ -6,6 +6,7 @@ import { createHash, randomUUID } from "crypto";
 export const CONFIG_DIR = process.env.FE_CONFIG_DIR || path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "find-everything");
 export const BUILTIN_SCOPES = ["home", "downloads", "documents", "applications", "all", "custom"];
 export interface IndexOptions {
+  exhaustive?: boolean;
   includeHidden?: boolean;
   includeIgnored?: boolean;
   extraExcludes?: string;
@@ -41,7 +42,7 @@ export function profiles(): IndexProfile[] {
   return data.indexes.map((p: IndexProfile) => {
     validateName(p.name);
     if (names.has(p.name) || BUILTIN_SCOPES.includes(p.name) || !Array.isArray(p.paths) || !p.paths.length || p.paths.length > 64 || p.paths.some(v => typeof v !== "string" || !path.isAbsolute(v) || /[\r\n]/.test(v))
-      || (p.includeHidden !== undefined && typeof p.includeHidden !== "boolean") || (p.includeIgnored !== undefined && typeof p.includeIgnored !== "boolean")
+      || (p.exhaustive !== undefined && typeof p.exhaustive !== "boolean") || (p.includeHidden !== undefined && typeof p.includeHidden !== "boolean") || (p.includeIgnored !== undefined && typeof p.includeIgnored !== "boolean")
       || (p.extraExcludes !== undefined && typeof p.extraExcludes !== "string")
       || (p.indexMaxAgeMinutes !== undefined && (!Number.isFinite(Number(p.indexMaxAgeMinutes)) || Number(p.indexMaxAgeMinutes) < 1 || Number(p.indexMaxAgeMinutes) > 10080))) throw new Error(`Invalid index profile: ${p.name}`);
     names.add(p.name);

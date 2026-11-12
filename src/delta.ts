@@ -23,7 +23,7 @@ export function liveStatus(index: string) {
     const row = db.query("SELECT * FROM scopes WHERE name=? AND stamp=?").get(index, baseStamp(index));
     if (!row) return { watching: false, revision: 0, problem: null };
     let watching = false, statusUnknown = false;
-    try { process.kill(row.pid, 0); watching = row.pid > 0; }
+    try { if(Number.isInteger(row.pid)&&row.pid>0){process.kill(row.pid, 0); watching = true;}else statusUnknown=true; }
     catch (e) { if (e.code === "EPERM") statusUnknown = true; else if (e.code !== "ESRCH") throw e; }
     return { watching, statusUnknown, revision: row.revision, problem: row.problem, lastChange: row.lastChange,
       pending: db.query("SELECT count(*) AS n FROM jobs WHERE scope=?").get(index).n };

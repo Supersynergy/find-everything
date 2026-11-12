@@ -6,6 +6,23 @@ import path from 'node:path';
 import {execFileSync,spawn} from 'node:child_process';
 import {socketRequest} from '../src/socket';
 import {Database} from 'bun:sqlite';
+test('a shared event helper keeps generated-folder updates for an exhaustive index',{timeout:15000},async()=>{
+  const dir=realpathSync(mkdtempSync(path.join(tmpdir(),'fe-inclusive-live-'))),root=path.join(dir,'files');mkdirSync(root);
+  const added=path.join(root,'Library','receipt.pdf'),helper=path.join(dir,'events'),capture=path.join(dir,'config.json');
+  const env={...process.env,FE_DATA_DIR:path.join(dir,'cache'),FE_CONFIG_DIR:path.join(dir,'config'),FE_EVENTS_HELPER:helper};
+  const exe=process.env.FE_TEST_CLI||process.execPath,prefix=process.env.FE_TEST_CLI?[]:[path.resolve('src/cli.ts')];
+  for(const name of ['ordinary','inclusive'])execFileSync(exe,[...prefix,'index',root,'--name',name,...(name==='inclusive'?['--exhaustive']:[])],{env,timeout:10000});
+  writeFileSync(helper,`#!${process.execPath}\nimport fs from 'node:fs';let s='';for await(const c of process.stdin)s+=c;const config=JSON.parse(s);fs.writeFileSync(${JSON.stringify(capture)},s);fs.mkdirSync(${JSON.stringify(path.dirname(added))},{recursive:true});fs.writeFileSync(${JSON.stringify(added)},'fixture');for(const r of config.roots){console.log(JSON.stringify({root:r.path,ready:true}));if(!r.excludes.includes('Library'))console.log(JSON.stringify({root:r.path,uuid:'fixture',cursor:'1',events:[{path:${JSON.stringify(added)},flags:256}]}));}setInterval(()=>{},1000);\n`,{mode:0o700});
+  const socket=path.join(dir,'service.sock');let service:ReturnType<typeof spawn>|undefined;
+  try{
+    service=spawn(exe,[...prefix,'serve','--socket',socket,'--live'],{env,stdio:['ignore','ignore','pipe']});service.stderr!.on('data',()=>{});
+    const deadline=Date.now()+10000;let found=false;
+    while(Date.now()<deadline){if(existsSync(capture)&&existsSync(socket+'.json')){const result=await socketRequest(socket,'/v1/search?'+new URLSearchParams({q:'receipt',index:'inclusive'}));if(result.paths.includes(added)){found=true;break;}}await new Promise(r=>setTimeout(r,80));}
+    assert(found,'The inclusive index must receive a newly created Library file');
+    assert(!JSON.parse(readFileSync(capture,'utf8')).roots[0].excludes.includes('Library'));
+    const ordinary=await socketRequest(socket,'/v1/search?'+new URLSearchParams({q:'receipt',index:'ordinary'}));assert.deepEqual(ordinary.paths,[]);
+  }finally{if(service?.exitCode===null){const stopped=new Promise<void>(r=>service!.once('exit',()=>r()));service.kill('SIGTERM');await stopped;}rmSync(dir,{recursive:true,force:true});}
+});
 test('a disappearing ignore-check parent does not abort valid events in the same batch',{timeout:10000},async()=>{
   const dir=realpathSync(mkdtempSync(path.join(tmpdir(),'fe-event-race-'))),root=path.join(dir,'files'),racing=path.join(root,'race');mkdirSync(racing,{recursive:true});
   const gone=path.join(racing,'gone.txt'),kept=path.join(root,'kept.txt');writeFileSync(gone,'race');

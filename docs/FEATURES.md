@@ -1,6 +1,6 @@
 # What Find Everything actually does
 
-Capability guide for the **0.3.0 preview source**, reviewed **1 November 2026**. This is a source-backed inventory with regression checks, not a benchmark or a claim that optional sound models and runtimes are bundled.
+Capability guide for the **0.3.1 preview source**, reviewed **12 November 2026**. This is a source-backed inventory with regression checks, not a benchmark or a claim that optional sound models and runtimes are bundled.
 
 **The core:** search saved **filenames, paths and prepared properties**, then act on selected files. Version 0.3.0 adds explicitly prepared **document full-text search** with `content:`. No OCR or semantic document search is provided.
 
@@ -51,7 +51,7 @@ fe properties --index work --max-files 10000 --seconds 30
 
 Repeat bounded preparation while work remains. Inspect coverage before interpreting an empty result as absence.
 
-Sources: [native filter controls](../app/Sources/FindEverything/ColumnFilters.swift), [column definitions and query options](../app/Sources/FindEverything/Presentation.swift), [complete-search regressions](../tests/complete.test.ts), [coverage contract](COMPLETE-SEARCH.md).
+Sources: [native filter controls](../app/Sources/FindEverything/ColumnFilters.swift), [column definitions and query options](../app/Sources/FindEverything/Presentation.swift), [complete-search regressions](../tests/complete.test.ts), [coverage contract](../README.md#verification-and-limitations).
 
 ## 3. Turn supported phrases into local filters
 
@@ -86,7 +86,7 @@ Available fields include duration/length, channels, sample rate, bitrate, width 
 
 The filename need not contain “short”, “mono” or the requested dimensions. Metadata search is **not** visual image recognition, speech transcription or searching lyrics.
 
-Sources: [media extraction/search](../src/media.ts), [query-field definitions](../src/smart-query.ts), [media coverage/boundary tests](../tests/smart.test.ts), [preparation guide](SMART-SEARCH.md).
+Sources: [media extraction/search](../src/media.ts), [query-field definitions](../src/smart-query.ts), [media coverage/boundary tests](../tests/smart.test.ts), [preparation guide](../README.md#cli-quick-start).
 
 ## 5. Optionally find sounds by description
 
@@ -101,7 +101,7 @@ A local CLAP model compares a text description with **prepared audio vectors**. 
 
 After setup, inference stays local. The analysed excerpt is at most the **first ten seconds** of a file. The German-to-English sound vocabulary is limited; English descriptions are the more dependable input. Similarity is approximate, scores are not probabilities and this route never reports exhaustive certainty with `complete:true`.
 
-Sources: [setup, limitations and pinned model](SEMANTIC-AUDIO.md), [semantic search](../src/semantic.ts), [runtime and decoding](../runtime/worker.mjs), [native audio settings](../app/Sources/FindEverything/SearchSettings.swift#L138-L145).
+Sources: [setup, limitations and pinned model](../runtime/setup.sh), [semantic search](../src/semantic.ts), [runtime and decoding](../runtime/worker.mjs), [native audio settings](../app/Sources/FindEverything/SearchSettings.swift#L138-L145).
 
 ## 6. Get from a result to the next action
 
@@ -118,7 +118,7 @@ Sources: [setup, limitations and pinned model](SEMANTIC-AUDIO.md), [semantic sea
 
 Copying contents and showing a preview do **not** imply that document contents are indexed or searchable. File actions are explicit; ordinary search is not a file-management mutation.
 
-Sources: [native actions](../app/Sources/FindEverything/main.swift#L1400-L1436), [Quick Look](../app/Sources/FindEverything/QuickPreview.swift), [opening preferences](../app/Sources/FindEverything/Presentation.swift#L182), [keyboard/navigation contract](SMART-SEARCH.md#fenster-maus-und-tastatur).
+Sources: [native actions](../app/Sources/FindEverything/main.swift#L1400-L1436), [Quick Look](../app/Sources/FindEverything/QuickPreview.swift), [opening preferences](../app/Sources/FindEverything/Presentation.swift#L182), [keyboard/navigation contract](../tests/native/model.swift).
 
 ## 7. Keep useful work close
 
@@ -127,9 +127,10 @@ Sources: [native actions](../app/Sources/FindEverything/main.swift#L1400-L1436),
 - **History:** revisit previous searches; remembering new entries is configurable.
 - **Optional local learning:** successful opens can improve query-specific relevance. Merely typing a query does not train it; explicit sorts take priority. Disable or reset learning in settings.
 - **Visibility preferences:** hide system/generated/hidden/noisy paths from a view without deleting the index. `view:all` cannot restore paths that were never indexed.
+- **Inclusive indexing:** explicitly rebuild with `--exhaustive` to include hidden/ignored/generated folders, Library and .local. The native app exposes the rebuild and a show-all action; new view preferences show all indexed paths. Existing settings and explicit exclusions remain. [Usage and coverage limits](../README.md#include-files-excluded-by-a-normal-scan).
 - **Your view:** light/dark/system appearance, font size, compact/striped rows, file icons, visible columns, keyboard hints, preview/autoplay preferences, popup/window mode and Dock visibility.
 
-Sources: [settings and saved-search controls](../app/Sources/FindEverything/SearchSettings.swift), [saved searches](../app/Sources/FindEverything/main.swift#L810-L821), [bounded learning](../src/search-learning.ts), [ranking rules](SEARCH-RELEVANCE.md).
+Sources: [settings and saved-search controls](../app/Sources/FindEverything/SearchSettings.swift), [saved searches](../app/Sources/FindEverything/main.swift#L810-L821), [bounded learning](../src/search-learning.ts), [ranking rules](../src/search-ranking.ts).
 
 ## 8. Choose and maintain the search area
 
@@ -143,7 +144,7 @@ Sources: [settings and saved-search controls](../app/Sources/FindEverything/Sear
 
 A saved snapshot is not proof that all drives or protected files were indexed. Permissions, root choices, excludes, unknown properties and journal state still matter. No SSD-lifetime or universal speed improvement has been established by these features.
 
-Sources: [index profiles](../src/catalog.ts), [combined indexes](../src/combine.ts), [incremental updates](LIVE-INDEX.md), [native virtual table](../app/Sources/FindEverything/VirtualResultTable.swift), [resource-aware results](../app/Sources/FindEverything/VirtualResults.swift).
+Sources: [index profiles](../src/catalog.ts), [combined indexes](../src/combine.ts), [incremental updates](../src/live.ts), [native virtual table](../app/Sources/FindEverything/VirtualResultTable.swift), [resource-aware results](../app/Sources/FindEverything/VirtualResults.swift).
 
 ## 9. Use the engine in your workflow
 

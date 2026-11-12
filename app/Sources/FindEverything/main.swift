@@ -549,7 +549,7 @@ final class Model: ObservableObject {
     guard !indexing else {return}
     let picker = NSOpenPanel()
     picker.title = "Index a folder or project"
-    picker.message = "Include dotfiles and ignored work. Build and cache folders stay excluded."
+    picker.message = "Include hidden, ignored and generated files, or select project source only. Explicit exclusions and permissions still apply."
     picker.prompt = "Index Folder"
     picker.canChooseFiles = false; picker.canChooseDirectories = true
     picker.allowsMultipleSelection = true
@@ -571,6 +571,7 @@ final class Model: ObservableObject {
       name = "\(stem)-\(suffix)"; suffix += 1
     }
     let args = ["index", "--name", name, "--preset", respectIgnore.state == .on ? "project" : "folder", "--json", "--progress-json"]
+      + (respectIgnore.state == .on ? [] : ["--exhaustive"])
       + picker.urls.flatMap { ["--path", $0.path] }
     indexing=true;errorMessage=nil;indexingTarget=name;indexProgress=IndexingProgress()
     enrichmentTask=Task {
@@ -1101,13 +1102,13 @@ final class Model: ObservableObject {
     }
   }
 
-  func rebuild() {
+  func rebuild(exhaustive:Bool=false) {
     guard !indexing else { return }
     let target=scope.rawValue
     indexing=true;errorMessage=nil;indexingTarget=scope.label;indexProgress=IndexingProgress()
     enrichmentTask=Task {
       do {
-        _ = try await runTool(["index","--index",target,"--progress-json"])
+        _ = try await runTool(["index","--index",target,"--progress-json"] + (exhaustive ? ["--exhaustive"] : []))
         if !Task.isCancelled {await loadIndexes()}
       } catch {if !Task.isCancelled {errorMessage=error.localizedDescription}}
       finishIndexing()

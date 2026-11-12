@@ -18,13 +18,13 @@ function check(ok: unknown, message: string): asserts ok { if (!ok) throw new Er
 
 const version = (JSON.parse(read("package.json")) as { version: string }).version;
 const manifest = JSON.parse(read("release-artifacts/release.json")) as Manifest;
-check(version === '0.3.0' && manifest.version === version && manifest.tag === `v${version}`, "Version/tag mismatch");
+check(version === '0.3.1' && manifest.version === version && manifest.tag === `v${version}`, "Version/tag mismatch");
 check(manifest.preview === true && manifest.notarized === false && manifest.architecture === "arm64", "Preview must not claim notarized, stable or universal distribution");
 check(read("src/services.ts").includes(`export const VERSION = "${version}"`), "CLI source version mismatch");
 check(read("app/bundle-app.sh").split(`<string>${version}</string>`).length === 3, "Native bundle version mismatch");
 check(read("README.md").includes(`releases/tag/v${version}`), "README does not link current release");
 check(read("docs/release/RELEASE-NOTES.md").includes("not notarized"), "Notarization limitation missing");
-check(read("README.md").includes("first app launch") && read("README.md").includes("0.3.0"), "First-run/version presentation missing");
+check(read("README.md").includes("first app launch") && read("README.md").includes(version), "First-run/version presentation missing");
 const productImages=['hero.png','native-light.png','native-dark.png','native-missing-index.png','native-filters.png','indexing-scan.png','indexing-progress.png','indexing-paused.png','indexing-narrow.png'];
 check(manifest.assets.length === 1 && manifest.assets[0].name === "FindEverything.app.zip", "Unexpected archive set");
 check(Array.isArray(manifest.codeFiles) && manifest.codeFiles.includes("src/engine.ts") && manifest.codeFiles.includes("app/Sources/FindEverything/main.swift"), "Build source inventory missing");

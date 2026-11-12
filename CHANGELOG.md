@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1 — 2026-11-12
+
+- Add explicit inclusive indexing with `--exhaustive`, persisted across rebuilds and live updates. Include hidden/ignored/generated folders, Library, .local and mounted volumes; preserve explicit exclusions and permissions. Add native rebuild/show-all actions and show all indexed files by default for new preferences.
+- Match canonically equivalent Unicode filename spellings in path, filename, folder, media and document-path filters. Keep old accelerators readable and upgrade derived keys through explicit preparation.
+- Fix absolute folder filters matching similarly named sibling folders. Use the indexed directory prefix for prepared folder queries.
+- Remove stale descendants after live subtree deletion under non-BMP folder names. Discover application directories consistently before and after lookup preparation.
+- Report scanner diagnostics and skipped newline-containing paths as incomplete coverage. Handle missing watcher PIDs without signaling an invalid process.
+- Update the Raycast API and lockfiles; add synthetic correctness fixtures and a Hyperfine comparison harness with source/binary identities and explicit measurement limits.
+
 ## 0.3.0 — 2026-11-01 (preview; correct sequence after 0.2.0)
 
 - Correct the previously published 0.14.0 label to 0.3.0. After 0.3.0 was verified, the owner explicitly requested deletion of the incorrect public release, its downloads and tag. Local rollback copies are retained; 0.2.0 and 0.3.0 are unchanged.

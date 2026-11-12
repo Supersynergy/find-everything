@@ -122,10 +122,10 @@ enum ResultColumn: String, CaseIterable, Identifiable {
 }
 
 struct SearchViewOptions:Codable,Equatable {
-  var hideSystem=true
-  var hideGenerated=true
-  var hideHidden=true
-  var hideNoise=true
+  var hideSystem=false
+  var hideGenerated=false
+  var hideHidden=false
+  var hideNoise=false
   var refreshSeconds=5
   var autoplayPreview=false
   var cacheMiB=32

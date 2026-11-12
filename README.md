@@ -4,9 +4,9 @@
 
 Local-first file search for macOS. Find a filename across folders, combine precise filters, preview the result and get back to work. Native SwiftUI/AppKit app · JSON CLI · local API · MCP · optional Raycast extension.
 
-**New in 0.3.0:** explicitly index document contents, then search with `content:"quarterly revenue"`. The first app launch also schedules an **All** path index once, with visible progress and pause/cancel controls.
+**New in 0.3.1:** rebuild an index with `--exhaustive` to include hidden, ignored and generated files, `Library` and `.local`. Search accented filenames across Unicode spellings, keep folder filters inside their folder, and see when scanning was incomplete. New native preferences show all indexed paths; existing preferences are preserved.
 
-[**Get the 0.3.0 preview**](https://github.com/Supersynergy/find-everything/releases/tag/v0.3.0) · [Features](#features) · [Search examples](#one-line-many-ways-to-find-it) · [Build from source](#build-from-source) · [CLI](#cli-quick-start) · [Privacy](#local-data-and-privacy) · [Release notes](docs/release/RELEASE-NOTES.md)
+[**Get the 0.3.1 preview**](https://github.com/Supersynergy/find-everything/releases/tag/v0.3.1) · [Features](#features) · [Search examples](#one-line-many-ways-to-find-it) · [Build from source](#build-from-source) · [CLI](#cli-quick-start) · [Privacy](#local-data-and-privacy) · [Release notes](docs/release/RELEASE-NOTES.md)
 
 > **Apple Silicon preview — not notarized.** The downloadable build is locally signed, not signed with a trusted Developer ID or Apple-notarized. Gatekeeper may refuse it. We do not recommend disabling Gatekeeper, removing quarantine or changing privacy permissions to bypass this. Build from source with your own signing identity, or wait for a notarized release. Intel and older macOS versions have not been verified.
 
@@ -164,7 +164,7 @@ These are rendered production views with fixture progress, not scans of personal
 
 The complete app archive requires **macOS 15 or later on Apple Silicon**; its native helper binaries target macOS 15. It was built and checked on macOS 15.8.2. The source app/CLI target alone is not the compatibility floor of the complete bundle.
 
-The [release page](https://github.com/Supersynergy/find-everything/releases/tag/v0.3.0) contains:
+The [release page](https://github.com/Supersynergy/find-everything/releases/tag/v0.3.1) contains:
 
 - `FindEverything.app.zip`: Apple Silicon app with its bundled CLI and native helpers.
 - `SHA256SUMS.txt`: archive and manifest checksums.
@@ -221,6 +221,23 @@ bun run src/cli.ts content clear --index work --json
 
 Once installed, replace `bun run src/cli.ts` with `fe`. Use `fe --help` for the command list. `fe mcp` provides the local MCP interface; the native app normally uses a permission-restricted Unix socket rather than an exposed remote service.
 
+### Include files excluded by a normal scan
+
+```sh
+# Explicitly rebuild the chosen index, including hidden/ignored/generated folders:
+fe index --index work --exhaustive
+fe prepare --index work
+fe search 'receipt view:all' --index work --json
+# Restore the standard exclusions on a later explicit rebuild:
+fe index --index work --no-exhaustive
+```
+
+In the app, use **Settings → Indexes → Rebuild with all accessible files**, then **Settings → Search → Show all indexed files**. Adding a folder includes these files unless you choose project source only. Existing snapshots gain those paths after an explicit rebuild; changing the view alone cannot add missing paths.
+
+`--exhaustive` preserves your explicit `--exclude` patterns and never bypasses macOS permissions. An All index includes mounted volumes but skips virtual `/dev`, `/proc`, `/sys` and the duplicate macOS `/System/Volumes/Data` tree. Directory symlinks are not followed. Scan failures and skipped newline-containing paths prevent `complete:true`. Completeness describes matches in the saved snapshot, not proof that every current disk file is accessible. An inclusive scan can need more time and space; the existing limits remain.
+
+Search keys use canonical Unicode normalization while returned paths retain their exact spelling. Existing search databases remain readable; `fe prepare` upgrades their derived lookup from saved paths without another directory scan. [Reproducible Hyperfine benchmark](docs/BENCHMARKS-2026-11-12.md).
+
 ### Large indexes
 
 The flat path index is streamed to disk with backpressure. The current path index replaces the former 1-GiB output cutoff with a finite **8-GiB maximum**, limited further by the free disk space available at the start, leaving a 256-MiB reserve in that initial budget. Timeouts, path-length checks and atomic replacement remain in place. This does not promise an index of every protected macOS file; permissions, excludes, scan time and available disk still apply.
@@ -257,7 +274,7 @@ For uninstall/cleanup, first quit the app and stop only the Find Everything agen
 
 Release checks cover project tests/typechecking, native model/navigation/table/presentation tests, bundle signature and version consistency, archive checksums, included notices and product-image presence. Independent report-only passes covered data preservation, security boundaries, licences/privacy, resource bounds and UI source states. These are scoped checks, not a security or legal certification.
 
-Manual screen/keyboard/VoiceOver verification was unavailable because macOS Accessibility/Screen Recording permissions were not granted. Synthetic offscreen rendering does not replace it. Long-running memory/recovery behaviour, Intel, older macOS, full dependency-advisory checks and a complete third-party legal review remain unverified. See [the register](COMPLIANCE.md).
+Manual screen/keyboard/VoiceOver acceptance has not been completed for this preview. Synthetic offscreen rendering does not replace it. Long-running memory/recovery behaviour, Intel, older macOS, the bundled runtime's complete advisory coverage and a complete third-party legal review remain unverified. The JavaScript dependency audit was checked for 0.3.1. See [the register](COMPLIANCE.md).
 
 ## Contributing
 

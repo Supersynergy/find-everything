@@ -1,38 +1,30 @@
-# Find Everything 0.3.0 · Apple Silicon preview
+# Find Everything 0.3.1 · Apple Silicon preview
 
-Native macOS file search with saved local indexes, a CLI and optional Raycast integration.
+Find files that a normal scan excludes, and search accented filenames consistently.
 
-![Native search interface rendered with synthetic demo files](https://raw.githubusercontent.com/Supersynergy/find-everything/v0.3.0/docs/release/images/hero.png)
+- `--exhaustive` includes hidden files, ignore-file matches, generated folders, `Library`, `.local` and mounted volumes within the selected roots. Explicit exclusions, permissions, scan time and disk limits remain. Settings persist across rebuilding and incremental updates.
+- Native Settings offers an inclusive rebuild and a show-all action. New preferences display all indexed paths; saved preferences are preserved. Adding a folder includes generated files unless project source only is selected.
+- Composed and decomposed accented names match in filename, path and folder filters. Paths keep their exact spelling. Existing accelerators stay usable; explicit preparation upgrades their derived Unicode keys without another folder traversal.
+- `in:/path/Invoices` no longer includes `Invoices-old`. Prepared folder restrictions use the directory index.
+- Scanner errors and skipped newline-containing paths are reported as incomplete coverage. Live deletion beneath emoji folders removes descendants correctly. Application folders match before and after lookup preparation. Missing watcher PIDs no longer produce an invalid process signal.
+- Update the Raycast API and dependency lockfiles. The release includes a synthetic Hyperfine script and regression fixtures. See the [benchmark report](../BENCHMARKS-2026-11-12.md) for results and limits.
 
-## Changes
+## Update and include missing files
 
-- Correct the release sequence after 0.2.0: the intended version is **0.3.0**. After verification of 0.3.0, the owner explicitly requested removal of the incorrectly numbered 0.14.0 release, downloads and public tag. The 0.3.0 downloads and 0.2.0 release are unchanged.
-- Automatically schedule an **All (/)** path index on the first application start, once dependencies are ready. Reuse an existing All snapshot. The once-only attempt marker prevents a canceled scan restarting on every launch; retry explicitly from the app.
-- Add a compact native footer with real file counts, a progress bar, Pause/Continue and Cancel. Scanning has no known total and shows no invented percentage; lookup preparation reports measured byte progress, capped below 100% until finalization.
-- Pause stops the owned worker group, including disk/CPU work. Paused time is excluded from its timeout. A separate guardian cleans up that group if its supervisor crashes while paused. Cancel during scanning keeps the previous snapshot; cancel during lookup preparation keeps the newly completed path snapshot and resumable derived preparation.
-- Core first-run indexing works with the macOS system file walker when optional fd/ripgrep/fzf tools are absent. It respects configured exclusions, does not follow directory symlinks or request elevated access; this fallback does not interpret project ignore files. Protected/unreadable locations are outside coverage.
-- Add explicitly prepared local document-text search with `content:`. Text/code, extractable PDFs and supported macOS document formats are bounded; OCR is not provided. Content is not indexed automatically. The private local full-text cache is unencrypted and can be cleared without deleting originals.
-- Update product images and examples using synthetic native fixtures, with light/dark/narrow/paused indexing states.
-- Fix All (`/`) index creation stopping at 1 GiB of streamed path output. The new output budget is capped at 8 GiB and further limited by initial free disk space minus 256 MiB. Existing backpressure, timeout, path guards and atomic replacement remain.
-- Require the pinned publisher and Gatekeeper approval in the remote installer. Do not implicitly enable live/nightly indexing during an update.
-- Replace unchecked in-app helper downloads with trusted package-manager instructions and a tool recheck.
-- Preserve saved typing-delay preferences; clarify missing-index and searching states; improve labels and shared control contrast.
-- Include project/Bun notices, release manifest, SHA-256 checksums and privacy-clean product images.
+Download the app archive, manifest and checksums from the release page. Verify them with `shasum -a 256 -c SHA256SUMS.txt` before opening the app. A local source installation can be updated with `bash install.sh --local`; it retains a rollback copy.
 
-## Download and verification
-
-`FindEverything.app.zip` contains the Apple Silicon app, compiled CLI and native helpers. The complete bundle requires macOS 15 or later; it was built and checked on macOS 15.8.2. Download `SHA256SUMS.txt` and `release.json` beside it, then run:
+For an existing index:
 
 ```sh
-shasum -a 256 -c SHA256SUMS.txt
+fe index --index work --exhaustive
+fe prepare --index work
+fe search 'receipt view:all' --index work --json
 ```
 
-Checksums detect changed files. They are not trusted publisher identity or notarization evidence.
+Use your existing index name in place of `work`. Existing snapshots acquire newly included paths after the explicit rebuild. In the app, choose Settings → Indexes → Rebuild with all accessible files, then Settings → Search → Show all indexed files.
 
-## Important preview limits
+## Preview limits
 
-**This build is locally signed and not notarized.** It is not a normal Developer ID-distributed macOS release. Gatekeeper may refuse it; the remote installer intentionally refuses unapproved previews. Do not remove quarantine, disable Gatekeeper or reset privacy permissions to get around this. Build from source with your own identity or wait for a notarized release.
+The archive is an **Apple Silicon, macOS 15+ preview, locally signed and not notarized**. Gatekeeper may refuse it; signing and checksums do not replace Apple notarization. Intel, older macOS and manual VoiceOver/interactive acceptance are unverified. Production screenshots remain synthetic offscreen renderings. Benchmarks use isolated saved paths and do not measure an entire disk.
 
-Only the available Apple Silicon environment was exercised. Intel, older macOS, manual complete keyboard/VoiceOver flows, prolonged memory/recovery behaviour and full third-party legal review remain unverified. Native images are offscreen renders of production views with synthetic files, not private screenshots or performance measurements. No release verification performed a whole-disk scan or indexed personal document bodies. Temporary fixture tests exercised real pause/resume, cancellation, supervisor-death cleanup and the no-Homebrew path; the >1-GiB regression exercises byte accounting without allocating or scanning a gigabyte. Automatic first-run All indexing happens when the user launches the updated app; macOS permissions, exclusions and resource limits still apply.
-
-Optional semantic models, runtime dependencies and fd/ripgrep/fzf are not redistributed in the app archive. Review [third-party notices](https://github.com/Supersynergy/find-everything/blob/v0.3.0/THIRD-PARTY-NOTICES.md) and the [release register](https://github.com/Supersynergy/find-everything/blob/v0.3.0/COMPLIANCE.md). No security, legal or accessibility certification is claimed.
+Permissions, explicit exclusions, resource limits, unsupported newline-containing paths and stale snapshots still bound coverage. All-index scans omit virtual filesystems and the duplicate `/System/Volumes/Data` tree; directory symlinks are not followed. No personal disk scan or document-body indexing is performed by the release checks. Optional sound models and search tools are not bundled. The previous previews remain available.

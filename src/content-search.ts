@@ -224,7 +224,8 @@ export async function searchContents(index:string,pq:ContentQuery,limit=300,offs
     const deadline=performance.now()+8000;
     for(const row of candidates.slice(0,MATCH_LIMIT)) {
       if(performance.now()>deadline)throw new Error('Content search exceeded 8 seconds; narrow it with name:, in: or ext:');
-      if((favorites&&!favorites.has(row.path))||omitted(row.path,pq.omit)||!constraints.every(c=>c.pattern.test(row.path)!==c.negate)||!pq.fuzzy.every(t=>fuzzyMatches(row.path.toLowerCase(),t)))continue;
+      const normalized=row.path.normalize('NFC');
+      if((favorites&&!favorites.has(row.path))||omitted(row.path,pq.omit)||!constraints.every(c=>c.pattern.test(normalized)!==c.negate)||!pq.fuzzy.every(t=>fuzzyMatches(normalized.toLowerCase(),t)))continue;
       if(!matchesSize(row.size,pq.sizeFilter)||(pq.dmFilter&&Date.now()-row.mtime>=pq.dmFilter.days*86400000))continue;
       try {if(!sameFile(row,fs.lstatSync(row.path))){invalid++;continue;}} catch {invalid++;continue;}
       matches.push(row);

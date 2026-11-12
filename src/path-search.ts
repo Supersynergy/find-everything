@@ -9,7 +9,7 @@ import {omissionRules,omitted,NOISE_NAMES,NOISE_SUFFIXES} from './file-filters';
 import {relevanceOrder,relevanceScore} from './search-ranking';
 
 export const searchIndexPath = (index:string) => path.join(INDEX_DIR,`search-${validateName(index)}.sqlite`);
-const VERSION='2';
+const VERSION='3';
 const FULL="d.path || f.name || CASE WHEN f.slash=1 THEN '/' ELSE '' END";
 type RowSet={table:string;count:number};
 const connections=new Map<string,{db:Database;stamp:string;revision:string;directoryCounts:Map<string,number>;counts:Map<string,{total:number;known:number;matched:number}>;sets:Map<string,RowSet|null>;seeds:Map<string,boolean>;sequence:number;directories:number;rows:number}>();
@@ -21,7 +21,7 @@ function tune(db:Database) {db.exec('PRAGMA busy_timeout=1000; PRAGMA cache_size
 // Readers keep the whole accelerator reachable through one mapping instead of
 // copying every trigram page through read(2); the page cache grows to 64 MiB so
 // repeated keystrokes stop re-reading the same B-tree and FTS pages.
-function tuneReader(db:Database) {db.exec('PRAGMA busy_timeout=1000; PRAGMA cache_size=-65536; PRAGMA temp_store=MEMORY; PRAGMA threads=1; PRAGMA mmap_size=2147483648;');}
+function tuneReader(db:Database) {db.function('fe_nfc',{deterministic:true},(s:string)=>s.normalize('NFC'));db.exec('PRAGMA busy_timeout=1000; PRAGMA cache_size=-65536; PRAGMA temp_store=MEMORY; PRAGMA threads=1; PRAGMA mmap_size=2147483648;');}
 function closeCached(index:string) {const c=connections.get(index);if(c){c.db.close();connections.delete(index);}}
 function closeProperties(index:string){if(propertyConnection?.index===index){propertyConnection.db.close();propertyConnection=undefined;}}
 function openProperties(index:string):Database|undefined {
@@ -32,21 +32,21 @@ function openProperties(index:string):Database|undefined {
   const db=new Database(file,{readonly:true});
   try {
     tune(db);db.exec('PRAGMA cache_size=-1024');
-    if(getMeta(db,'version')!==VERSION||getMeta(db,'source')!==source||getMeta(db,'ready')!=='1'){db.close();return;}
+    if(!['2',VERSION].includes(getMeta(db,'version'))||getMeta(db,'source')!==source||getMeta(db,'ready')!=='1'){db.close();return;}
     propertyConnection={index,stamp,db};return db;
   }catch(e){db.close();throw e;}
 }
 const damagedCache=(e:any)=>['SQLITE_CORRUPT','SQLITE_NOTADB'].includes(e.code)||/not a database|database disk image is malformed|no such table: (meta|files|directories)/i.test(String(e.message));
 function splitPath(p:string) {const clean=p.replace(/\/$/,'')||'/';return {parent:path.dirname(clean).replace(/\/$/,'')+'/',name:path.basename(clean),slash:p.endsWith('/')&&p!=='/'?1:0};}
-function openReady(index:string):Database|undefined {
+function openReady(index:string,normalized=false):Database|undefined {
   const file=searchIndexPath(index);if(!fs.existsSync(file))return;
   const s=fs.statSync(file),stamp=`${s.mtimeMs}:${s.size}:${baseStamp(index)}`;
-  const previous=connections.get(index);if(previous?.stamp===stamp){connections.delete(index);connections.set(index,previous);return previous.db;}
+  const previous=connections.get(index);if(previous?.stamp===stamp&&(!normalized||getMeta(previous.db,'version')===VERSION)){connections.delete(index);connections.set(index,previous);return previous.db;}
   closeCached(index);
   const db=new Database(file,{readonly:true});
   try {
     tuneReader(db);
-    if(getMeta(db,'version')!==VERSION||getMeta(db,'source')!==baseStamp(index)||getMeta(db,'ready')!=='1'){db.close();return;}
+    if(!(normalized?[VERSION]:['2',VERSION]).includes(getMeta(db,'version'))||getMeta(db,'source')!==baseStamp(index)||getMeta(db,'ready')!=='1'){db.close();return;}
     while(connections.size>=3)closeCached(connections.keys().next().value!);
     const stored=getMeta(db,'indexedRows'),valid=getMeta(db,'rowCountVersion')==='1'&&/^\d+$/.test(stored??'')&&Number.isSafeInteger(Number(stored));
     const context={db,stamp,revision:'',directoryCounts:new Map<string,number>(),counts:new Map<string,{total:number;known:number;matched:number}>(),sets:new Map<string,RowSet|null>(),seeds:new Map<string,boolean>(),sequence:0,directories:-1,rows:valid?Number(stored):db.query('SELECT count(*) AS n FROM files').get().n};
@@ -73,8 +73,8 @@ function inserter(db:Database) {
   const add=db.query('INSERT OR IGNORE INTO files(parent,name,nameKey,slash) VALUES (?,?,?,?)');
   return (p:string)=>{
     const s=splitPath(p);let id=parents.get(s.parent);
-    if(id===undefined){addParent.run(s.parent,s.parent.toLowerCase());id=findParent.get(s.parent).id;if(parents.size>=8192)parents.delete(parents.keys().next().value!);parents.set(s.parent,id!);}
-    add.run(id,s.name,s.name.toLowerCase(),s.slash);return directChanges(db);
+    if(id===undefined){addParent.run(s.parent,s.parent.normalize('NFC').toLowerCase());id=findParent.get(s.parent).id;if(parents.size>=8192)parents.delete(parents.keys().next().value!);parents.set(s.parent,id!);}
+    add.run(id,s.name,s.name.normalize('NFC').toLowerCase(),s.slash);return directChanges(db);
   };
 }
 
@@ -109,7 +109,7 @@ export async function prepareSearch(index:string,seconds=60,maxRows=10000000) {
 async function prepareSnapshot(index:string,seconds:number,maxRows:number) {
   const file=searchIndexPath(index),source=baseStamp(index);
   let ready:Database|undefined;
-  try{ready=openReady(index);}catch(e){if(!damagedCache(e))throw e;}
+  try{ready=openReady(index,true);}catch(e){if(!damagedCache(e))throw e;}
   if(ready){
     if(getMeta(ready,'ordered')!=='1'||getMeta(ready,'rowCountVersion')!=='1'){const release=acquireLock(file+'.lock');let db:Database|undefined;try{closeCached(index);db=new Database(file);tune(db);orderedIndexes(db);}finally{try{db?.close();}finally{release();}}}
     return {...searchIndexStatus(index),reused:true};
@@ -181,7 +181,7 @@ export function syncSearch(index:string) {
     const metadata=db.query('UPDATE files SET size=?,mtime=?,dir=?,slash=CASE WHEN ?=0 THEN 0 ELSE slash END WHERE parent=(SELECT id FROM directories WHERE path=?) AND name=?');
     db.transaction(()=>{
       for(const c of changes){if(c.revision<=committed)continue;const s=splitPath(c.path);
-        if(c.tree){const prefix=c.path.replace(/\/$/,'')+'/';db.query('DELETE FROM files WHERE parent IN (SELECT id FROM directories WHERE path=? OR substr(path,1,?)=?)').run(prefix,prefix.length,prefix);rowCount-=directChanges(db);}
+        if(c.tree){const prefix=c.path.replace(/\/$/,'')+'/';db.query('DELETE FROM files WHERE parent IN (SELECT id FROM directories WHERE substr(path,1,length(?))=?)').run(prefix,prefix);rowCount-=directChanges(db);}
         if(!c.present){remove.run(s.parent,s.name);rowCount-=directChanges(db);}
         else {rowCount+=add(c.path);try{const stat=fs.statSync(c.path),directory=Number(stat.isDirectory());metadata.run(stat.size,stat.mtimeMs,directory,directory,s.parent,s.name);}catch(e){if(!['ENOENT','ENOTDIR','EACCES','EPERM'].includes(e.code))throw e;}}
       }
@@ -218,7 +218,7 @@ function termGroups(pq:ParsedQuery) {return pq.fuzzy.map(t=>t.startsWith("'")?[t
 function matcher(pq:ParsedQuery) {
   const constraints=pq.constraints.map(c=>({re:new RegExp(c.pattern,'i'),negate:c.negate})),groups=termGroups(pq);
   const favorites=pq.favorites?new Set(pq.favorites):null;
-  return (p:string)=>(!favorites||favorites.has(p))&&!omitted(p,pq.omit)&&constraints.every(c=>c.re.test(p)!==c.negate)&&groups.every(g=>g.some(t=>/[A-Z]/.test(t)?p.includes(t):p.toLowerCase().includes(t.toLowerCase())));
+  return (p:string)=>{const normalized=p.normalize('NFC');return (!favorites||favorites.has(p))&&!omitted(p,pq.omit)&&constraints.every(c=>c.re.test(normalized)!==c.negate)&&groups.every(g=>g.some(t=>/[A-Z]/.test(t)?normalized.includes(t):normalized.toLowerCase().includes(t.toLowerCase())));};
 }
 
 // TEMP lives only in RAM. Keep at most two million integer IDs per connection;
@@ -250,6 +250,7 @@ function sqlPredicate(pq:ParsedQuery,db:Database,index:string,preview=false) {
   const args:any[]=[],parts:string[]=[],active=new Set<string>();
   let omittedSet:RowSet|undefined,baseTotal:number|undefined,baseCounter:(()=>number)|undefined;
   const context=connections.get(index)!;
+  const legacy=getMeta(db,'version')==='2';
   const seed=(table:'names_fts'|'directories_fts',quoted:string)=>{
     const key=table+quoted;let use=context.seeds.get(key);
     const cap=Math.min(100000,Math.max(10000,Math.floor(context.rows/100)));
@@ -277,32 +278,32 @@ function sqlPredicate(pq:ParsedQuery,db:Database,index:string,preview=false) {
   }
   if(pq.omit?.includes('hidden'))exclusions.push("(f.nameKey GLOB '.*' OR f.parent IN (SELECT id FROM directories WHERE pathKey GLOB '*/.*'))");
   const literal=(text:string,exact=/[A-Z]/.test(text)):string=>{
-    const folded=text.toLowerCase(),field=exact?'d.path || f.name':'d.pathKey || f.nameKey';
+    const folded=text.toLowerCase(),unicode=/[^\x00-\x7f]/.test(text),normalize=exact&&unicode,legacyUnicode=legacy&&unicode,field=exact?(normalize?'fe_nfc(d.path || f.name)':'d.path || f.name'):(legacyUnicode?'fe_nfc(d.pathKey || f.nameKey)':'d.pathKey || f.nameKey');
     if(preview){
       const term=folded.split('/').filter(s=>[...s].length>=3).sort((a,b)=>b.length-a.length)[0];
       let pre='';
-      if(term){const quoted='"'+term.replace(/"/g,'""')+'"';if(seed('names_fts',quoted)&&seed('directories_fts',quoted)){args.push(quoted,quoted);pre='(f.id IN (SELECT rowid FROM names_fts WHERE names_fts MATCH ?) OR f.parent IN (SELECT rowid FROM directories_fts WHERE directories_fts MATCH ?)) AND ';}}
+      if(term&&!legacyUnicode){const quoted='"'+term.replace(/"/g,'""')+'"';if(seed('names_fts',quoted)&&seed('directories_fts',quoted)){args.push(quoted,quoted);pre='(f.id IN (SELECT rowid FROM names_fts WHERE names_fts MATCH ?) OR f.parent IN (SELECT rowid FROM directories_fts WHERE directories_fts MATCH ?)) AND ';}}
       args.push(exact?text:folded);return pre+`instr(${field},?)>0`;
     }
     if(!text.includes('/')) {
-      const needle=exact?text:folded,nameField=exact?'f.name':'f.nameKey',parentField=exact?'path':'pathKey';
-      const quoted='"'+folded.replace(/"/g,'""')+'"',useFts=[...folded].length>=3;
+      const needle=exact?text:folded,nameField=exact?(normalize?'fe_nfc(f.name)':'f.name'):(legacyUnicode?'fe_nfc(f.nameKey)':'f.nameKey'),parentField=exact?(normalize?'fe_nfc(path)':'path'):(legacyUnicode?'fe_nfc(pathKey)':'pathKey');
+      const quoted='"'+folded.replace(/"/g,'""')+'"',useFts=!legacyUnicode&&[...folded].length>=3;
       const directoryFts=useFts&&seed('directories_fts',quoted);
       const directorySql=`SELECT id FROM directories WHERE ${directoryFts?'id IN (SELECT rowid FROM directories_fts WHERE directories_fts MATCH ?) AND ':''}instr(${parentField},?)>0`;
       const directoryArgs=directoryFts?[quoted,needle]:[needle];
       const cacheKey=JSON.stringify([text,exact]);let directories=context.directoryCounts.get(cacheKey);
       if(directories===undefined){
-        if(!directoryFts&&!exact){const r=db.query('SELECT count(*) AS total,coalesce(sum(instr(pathKey,?)>0),0) AS n FROM directories INDEXED BY directory_names').get(needle);directories=r.n;context.directories=r.total;}
+        if(!directoryFts&&!exact){const r=db.query(`SELECT count(*) AS total,coalesce(sum(instr(${parentField},?)>0),0) AS n FROM directories INDEXED BY directory_names`).get(needle);directories=r.n;context.directories=r.total;}
         else directories=db.query(`SELECT count(*) AS n FROM (${directorySql})`).get(...directoryArgs).n;
         if(context.directoryCounts.size>=64)context.directoryCounts.delete(context.directoryCounts.keys().next().value!);context.directoryCounts.set(cacheKey,directories!);
       }
       const single=pq.fuzzy.length===1&&termGroups(pq)[0].length===1&&!pq.constraints.length&&pq.favorites===undefined&&!pq.omit?.includes('noise');
       if(directories===context.directories&&directories>0){if(single)baseTotal=context.rows;return '1';}
-      if(!exact&&context.directories>0&&directories>context.directories/2&&(context.directories-directories)*context.rows/context.directories<=1000000){
+      if(!exact&&!legacyUnicode&&context.directories>0&&directories>context.directories/2&&(context.directories-directories)*context.rows/context.directories<=1000000){
         const missing=cachedSet(index,'SELECT f.id FROM directories v CROSS JOIN files f INDEXED BY parent_names ON f.parent=v.id WHERE instr(v.pathKey,?)=0 AND instr(f.nameKey,?)=0',[needle,needle],active);
         if(missing){if(single)baseTotal=context.rows-missing.count;return 'f.id NOT IN (SELECT id FROM temp.'+missing.table+')';}
       }
-      if(single&&!exact&&context.directories>0&&directories>context.directories/10){
+      if(single&&!exact&&!legacyUnicode&&context.directories>0&&directories>context.directories/10){
         baseCounter=()=>context.rows-db.query('SELECT count(*) AS n FROM directories v CROSS JOIN files f INDEXED BY parent_names ON f.parent=v.id WHERE instr(v.pathKey,?)=0 AND instr(f.nameKey,?)=0').get(needle,needle).n;
       }
       const nameFts=useFts&&seed('names_fts',quoted);
@@ -318,7 +319,7 @@ function sqlPredicate(pq:ParsedQuery,db:Database,index:string,preview=false) {
     }
     const ftsTerm=text.includes('/')?text.split('/').filter(s=>[...s].length>=3).sort((a,b)=>b.length-a.length)[0]:text;
     let pre='';
-    if(ftsTerm&&[...ftsTerm].length>=3){const quoted='"'+ftsTerm.toLowerCase().replace(/"/g,'""')+'"';if(seed('names_fts',quoted)&&seed('directories_fts',quoted)){args.push(quoted,quoted);pre='(f.id IN (SELECT rowid FROM names_fts WHERE names_fts MATCH ?) OR f.parent IN (SELECT rowid FROM directories_fts WHERE directories_fts MATCH ?))';}}
+    if(!legacyUnicode&&ftsTerm&&[...ftsTerm].length>=3){const quoted='"'+ftsTerm.toLowerCase().replace(/"/g,'""')+'"';if(seed('names_fts',quoted)&&seed('directories_fts',quoted)){args.push(quoted,quoted);pre='(f.id IN (SELECT rowid FROM names_fts WHERE names_fts MATCH ?) OR f.parent IN (SELECT rowid FROM directories_fts WHERE directories_fts MATCH ?))';}}
     args.push(exact?text:folded);
     return (pre?pre+' AND ':'')+`instr(${field},?)>0`;
   };
@@ -327,10 +328,14 @@ function sqlPredicate(pq:ParsedQuery,db:Database,index:string,preview=false) {
     if(c.suffixes){const seeded=parts.some(p=>p.includes('names_fts')||p.includes('directories_fts'));const suffixes=c.suffixes.map(s=>{let pre='';const quoted='"'+s.replace(/"/g,'""')+'"';if(!seeded&&[...s].length>=3&&seed('names_fts',quoted)){args.push(quoted);pre='f.id IN (SELECT rowid FROM names_fts WHERE names_fts MATCH ?) AND ';}args.push('*'+s);return '('+pre+'f.nameKey GLOB ?)';});parts.push('('+suffixes.join(' OR ')+')');}
     else if(c.literal!==undefined){
       let test:string;
-      if(c.field==='name'){
-        const value=c.literal.toLowerCase(),useFts=[...value].length>=3&&seed('names_fts','"'+value.replace(/"/g,'""')+'"');
+      if(c.field==='folder'){
+        const value=c.literal.toLowerCase();
+        if(c.prefix&&!(legacy&&/[^\x00-\x7f]/.test(value))){args.push(value,value.slice(0,-1)+'0');test='f.parent IN (SELECT id FROM directories WHERE pathKey>=? AND pathKey<?)';}
+        else {args.push(value);test=`f.parent IN (SELECT id FROM directories WHERE instr(${legacy? 'fe_nfc(pathKey)':'pathKey'},?)${c.prefix?'=1':'>0'})`;}
+      }else if(c.field==='name'){
+        const value=c.literal.toLowerCase(),legacyUnicode=legacy&&/[^\x00-\x7f]/.test(value),useFts=!legacyUnicode&&[...value].length>=3&&seed('names_fts','"'+value.replace(/"/g,'""')+'"');
         if(useFts)args.push('"'+value.replace(/"/g,'""')+'"');
-        args.push(value);test=(useFts?'f.id IN (SELECT rowid FROM names_fts WHERE names_fts MATCH ?) AND ':'')+'instr(f.nameKey,?)>0';
+        args.push(value);test=(useFts?'f.id IN (SELECT rowid FROM names_fts WHERE names_fts MATCH ?) AND ':'')+`instr(${legacyUnicode?'fe_nfc(f.nameKey)':'f.nameKey'},?)>0`;
       }else test=literal(c.literal,false);
       parts.push(c.negate?'NOT ('+test+')':'('+test+')');
     }

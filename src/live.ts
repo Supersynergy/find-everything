@@ -6,12 +6,16 @@ import { promisify } from "util";
 import { createInterface } from "readline";
 import { Database } from "bun:sqlite";
 import { acquireLock, CONFIG_DIR } from "./catalog";
-import { ALL_EXCLUDES, BASE_EXCLUDES, FD, HOME, INDEX_DIR, effectiveOptions, indexStatus, track } from "./engine";
+import { scanExcludes, FD, HOME, INDEX_DIR, effectiveOptions, indexStatus, track } from "./engine";
 import { baseStamp, openLive, livePath } from "./delta";
 import { repairMedia, mediaPath } from "./media";
 import { refreshSounds } from "./semantic";
 const exec = promisify(execFile);
 const under = (p: string, root: string) => p === root || p.startsWith(root.endsWith("/") ? root : root + "/");
+function excluded(p:string,root:string,patterns:string[]) {
+  const relative=path.relative(root,p),parts=relative.split(path.sep);
+  return patterns.some(e=>e.startsWith('/') ? relative===e.slice(1)||relative.startsWith(e.slice(1)+'/') : new Bun.Glob(e).match(relative)||parts.some(part=>new Bun.Glob(e).match(part)));
+}
 declare const Bun: { Glob: new (pattern: string) => { match(path: string): boolean } };
 const helper = () => process.env.FE_EVENTS_HELPER || path.join(HOME,"Applications/Find Everything.app/Contents/Helpers/fe-events");
 type Event = { path: string; flags: number; scopes?:string[] };
@@ -53,8 +57,8 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
     const opts = effectiveOptions(scope.name), root = scope.paths.find(r => under(p,r));
     if (!root || /[\r\n]/.test(p)) return false;
     const relative = path.relative(root,p), parts = relative.split(path.sep);
-    const exclusions = [...BASE_EXCLUDES,...(scope.name === "all" ? ALL_EXCLUDES : []),...(opts.extraExcludes || "").split(",").filter(Boolean)];
-    if ((!opts.includeHidden && parts.some(s => s.startsWith("."))) || exclusions.some(e => new Bun.Glob(e).match(relative) || parts.some(part => new Bun.Glob(e).match(part)))) return false;
+    const exclusions = scanExcludes(scope.name,opts);
+    if ((!opts.includeHidden && parts.some(s => s.startsWith("."))) || excluded(p,root,exclusions)) return false;
     if (opts.includeIgnored) return true;
     // fd evaluates the same inherited ignore rules; --max-depth prevents a subtree walk.
     const parent = path.dirname(p);
@@ -74,7 +78,7 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
   async function subtree(p: string, scope: typeof scopeList[number]) {
     const opts = effectiveOptions(scope.name), args = ["--absolute-path","--color=never","--print0","--threads","1"];
     if (opts.includeHidden) args.push("--hidden"); if (opts.includeIgnored) args.push("--no-ignore");
-    for (const e of [...BASE_EXCLUDES,...(opts.extraExcludes || "").split(",").filter(Boolean)]) args.push("--exclude",e);
+    for (const e of scanExcludes(scope.name,opts)) args.push("--exclude",e);
     const task = exec(FD,[...args,"--","",p],{timeout:5000,maxBuffer:8*1024*1024,killSignal:"SIGKILL"}); track(task.child);
     const paths = (await task).stdout.split("\0").filter(Boolean).map(x => x.replace(/\/$/,""));
     if (paths.length > 20000) throw new Error("Changed subtree exceeds 20000 paths; explicit reconciliation required");
@@ -113,8 +117,8 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
             }
             if (flags & 16 || !scope.paths.some(r => under(p,r))) continue; // HistoryDone
             const relative = path.relative(scope.paths.find(r => under(p,r))!,p);
-            const exclusions = [...BASE_EXCLUDES,...(scope.name === "all" ? ALL_EXCLUDES : []),...(scope.options.extraExcludes || "").split(",").filter(Boolean)];
-            if (relative.split(path.sep).some(part => (!scope.options.includeHidden && part.startsWith(".")) || exclusions.some(e => new Bun.Glob(e).match(part))) || exclusions.some(e => new Bun.Glob(e).match(relative))) continue;
+            const exclusions = scanExcludes(scope.name,scope.options);
+            if ((!scope.options.includeHidden&&relative.split(path.sep).some(part=>part.startsWith('.'))) || excluded(p,scope.paths.find(r=>under(p,r))!,exclusions)) continue;
             if ([".gitignore",".ignore",".fdignore"].includes(path.basename(p))) {
               if (scope.options.includeIgnored) continue;
               const baseline = scope.scanStartedAt ? Date.parse(scope.scanStartedAt) : Date.parse(scope.indexedAt || "")-120000;
@@ -199,7 +203,11 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
       const old = db.query("SELECT uuid,cursor FROM streams WHERE root=?").get(root);
       const targets=scopeList.filter(s=>s.paths.includes(root)).map(s=>({name:s.name,paths:s.paths,since:s.scanStartedAt ? Date.parse(s.scanStartedAt)/1000 : Date.parse(s.indexedAt || new Date().toISOString())/1000-120}));
       const since = Math.min(...targets.map(t=>t.since));
-      return { path:root,since,...old,targets,excludes:BASE_EXCLUDES };
+      // A shared watcher may suppress only exclusions common to every target.
+      // Root/path-specific rules remain in the per-index event filter.
+      const exclusions=scopeList.filter(s=>s.paths.includes(root)).map(s=>scanExcludes(s.name,s.options));
+      const common=exclusions[0].filter(e=>!e.includes('/')&&exclusions.every(rules=>rules.includes(e)));
+      return { path:root,since,...old,targets,excludes:common };
     });
     child = track(spawn(binary,[],{stdio:["pipe","pipe","pipe"]}));
     child.stdin.end(JSON.stringify({roots:config}));

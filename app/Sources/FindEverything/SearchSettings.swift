@@ -62,6 +62,7 @@ struct SearchOptionsView: View {
       Toggle("Remember new searches",isOn:$m.display.rememberHistory)
       Divider()
       Text("Visible results").fontWeight(.semibold)
+      Button("Show all indexed files") {m.viewOptions.hideSystem=false;m.viewOptions.hideGenerated=false;m.viewOptions.hideHidden=false;m.viewOptions.hideNoise=false}
       Toggle("Hide macOS system folders",isOn:$m.viewOptions.hideSystem)
       Toggle("Hide generated files and build/cache folders",isOn:$m.viewOptions.hideGenerated)
       Toggle("Hide dotfiles and hidden folders",isOn:$m.viewOptions.hideHidden)
@@ -138,6 +139,8 @@ struct SearchOptionsView: View {
       Divider()
       Text("Preparation reuses saved paths without traversing folders. Property indexing checks those paths once and resumes saved progress. Searches reuse the cache.").font(.caption).foregroundStyle(palette.muted)
       HStack { Button("Add folder or project…") {m.showOptions=false;m.indexFolder()};Button("Rebuild current index") {m.showOptions=false;m.rebuild()}.disabled(m.indexing) }
+      Button("Rebuild with all accessible files") {m.showOptions=false;m.rebuild(exhaustive:true)}.disabled(m.indexing)
+      Text("The inclusive rebuild also searches Library, .local and mounted volumes within the selected roots. Explicit exclusions and macOS permissions still apply. It can take longer and use more disk space.").font(.caption).foregroundStyle(palette.muted)
       Text("Rebuild reads the configured roots again. Use it only when you explicitly want to reconcile an older snapshot.").font(.caption).foregroundStyle(palette.muted)
       DisclosureGroup("Current search details") { Text(m.searchNote.isEmpty ? "No additional details" : m.searchNote).font(.caption).foregroundStyle(palette.muted).textSelection(.enabled) }
     }

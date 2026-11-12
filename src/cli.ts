@@ -59,6 +59,8 @@ function parseFlags(argv: string[]): { pos: string[]; flags: Flags } {
       case "--max-age": flags.opts.indexMaxAgeMinutes = String(numeric(value(), a, 1, 10080)); break;
       case "--exclude": flags.opts.extraExcludes = [flags.opts.extraExcludes, value()].filter(Boolean).join(","); break;
       case "--hidden": flags.opts.includeHidden = true; break;
+      case "--exhaustive": flags.opts.exhaustive = true; break;
+      case "--no-exhaustive": flags.opts.exhaustive = false; break;
       case "--no-hidden": flags.opts.includeHidden = false; break;
       case "--include-ignored": flags.opts.includeIgnored = true; break;
       case "--respect-ignore": flags.opts.includeIgnored = false; break;
@@ -130,6 +132,8 @@ const HELP = `fe — Find Everything ${VERSION}
   --name <name> --replace        save or explicitly update a profile
   --preset project|folder        project respects ignore files; folder includes them
   --hidden | --no-hidden         include/exclude dotfiles
+  --exhaustive                   include hidden/ignored/generated folders; keep explicit excludes
+  --no-exhaustive                restore standard scan exclusions on an explicit rebuild
   --include-ignored              bypass ignore files (build/cache exclusions remain)
   --exclude <glob>               repeatable extra exclusion
   --max-age <minutes>            snapshot age warning threshold (default 60)
@@ -204,6 +208,8 @@ async function cmdIndex(pos: string[], flags: Flags, worker = false): Promise<vo
   } else {
     selected = selection(flags);
     await rebuildIndex(selected.scope, selected.opts, monitor);
+    const saved=profiles().find(p=>p.name===selected.scope);
+    if(saved&&Object.keys(flags.opts).length)saveProfile({...saved,...flags.opts},true);
   }
   if (worker) {
     const totalBytes = fs.statSync(indexPathFor(selected.scope)).size;
@@ -245,7 +251,7 @@ async function cmdTui(flags: Flags): Promise<void> {
   await ensureIndex(scope, opts);
   const self = process.argv[1]?.endsWith(".ts") ? [process.execPath, path.resolve(process.argv[1])] : [process.execPath];
   const selector = flags.paths.length ? flags.paths.flatMap(p => ["--path", p]) : ["--index", scope];
-  const options = [...selector, ...(opts.includeHidden === false ? ["--no-hidden"] : ["--hidden"]), ...(opts.includeIgnored ? ["--include-ignored"] : ["--respect-ignore"]), ...(opts.extraExcludes ? ["--exclude", opts.extraExcludes] : []), "--max-age", opts.indexMaxAgeMinutes || "60"];
+  const options = [...selector, ...(opts.exhaustive ? ['--exhaustive'] : []), ...(opts.includeHidden === false ? ["--no-hidden"] : ["--hidden"]), ...(opts.includeIgnored ? ["--include-ignored"] : ["--respect-ignore"]), ...(opts.extraExcludes ? ["--exclude", opts.extraExcludes] : []), "--max-age", opts.indexMaxAgeMinutes || "60"];
   const prefix = shellCommand(self);
   const search = shellCommand([...self, "search", "--tui", "-n", String(flags.limit), ...options]);
   const rebuild = shellCommand([...self, "index", ...options]);
