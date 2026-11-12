@@ -21,8 +21,9 @@ test("buffered shards preserve every complete Unicode path across chunk boundari
 });
 
 test("large streamed indexes retain a finite disk cap and free-space reserve", () => {
-  assert.equal(INDEX_DISK_LIMIT_BYTES, 8 * 1024 ** 3);
-  assert.equal(indexByteBudget(20 * 1024 ** 3), INDEX_DISK_LIMIT_BYTES);
+  assert.equal(INDEX_DISK_LIMIT_BYTES, 32 * 1024 ** 3);
+  assert.equal(indexByteBudget(80 * 1024 ** 3), INDEX_DISK_LIMIT_BYTES);
+  assert.equal(indexByteBudget(20 * 1024 ** 3),18 * 1024 ** 3);
   assert.equal(indexByteBudget(2 * 1024 ** 3 + INDEX_FREE_RESERVE_BYTES), 2 * 1024 ** 3);
   for (const free of [NaN, Infinity, -1, INDEX_FREE_RESERVE_BYTES]) {
     assert.throws(() => indexByteBudget(free), /free disk space/i);

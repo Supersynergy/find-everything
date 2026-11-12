@@ -3,13 +3,18 @@ import * as fs from 'node:fs';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { acquireLock, validateName } from './catalog';
-import { INDEX_DIR, indexPathFor, ParsedQuery } from './engine';
+import { INDEX_DIR, INDEX_FREE_RESERVE_BYTES, indexPathFor, ParsedQuery } from './engine';
 import { baseStamp, deltaFor, livePath } from './delta';
 import {omissionRules,omitted,NOISE_NAMES,NOISE_SUFFIXES} from './file-filters';
 import {relevanceOrder,relevanceScore} from './search-ranking';
 
 export const searchIndexPath = (index:string) => path.join(INDEX_DIR,`search-${validateName(index)}.sqlite`);
 const VERSION='3';
+export const SEARCH_DISK_LIMIT_BYTES=48*1024**3;
+export function searchByteBudget(freeBytes:number,currentBytes=0):number {
+  if(!Number.isFinite(freeBytes)||freeBytes<=INDEX_FREE_RESERVE_BYTES||!Number.isSafeInteger(currentBytes)||currentBytes<0)throw new Error('Not enough free disk space to prepare search; keep at least 2 GiB free');
+  return Math.min(SEARCH_DISK_LIMIT_BYTES,Math.floor(currentBytes+freeBytes-INDEX_FREE_RESERVE_BYTES));
+}
 const FULL="d.path || f.name || CASE WHEN f.slash=1 THEN '/' ELSE '' END";
 type RowSet={table:string;count:number};
 const connections=new Map<string,{db:Database;stamp:string;revision:string;directoryCounts:Map<string,number>;counts:Map<string,{total:number;known:number;matched:number}>;sets:Map<string,RowSet|null>;seeds:Map<string,boolean>;sequence:number;directories:number;rows:number}>();
@@ -123,6 +128,13 @@ async function prepareSnapshot(index:string,seconds:number,maxRows:number) {
       if(!db)for(const suffix of ['', '-wal','-shm'])fs.rmSync(stage+suffix,{force:true});
     }
     if(!db){db=new Database(stage,{create:true});schema(db,source);}else tune(db);
+    const disk=fs.statfsSync(INDEX_DIR),budget=searchByteBudget(disk.bavail*disk.bsize,fs.statSync(stage).size);
+    let nextSpaceCheck=0;
+    const checkDisk=()=>{
+      const size=fs.statSync(stage).size+(fs.existsSync(stage+'-wal')?fs.statSync(stage+'-wal').size:0);
+      if(size>budget)throw new Error('Search accelerator reached its disk budget; free space and resume preparation');
+      const available=fs.statfsSync(INDEX_DIR);if(available.bavail*available.bsize<=INDEX_FREE_RESERVE_BYTES)throw new Error('Not enough free disk space to prepare search; keep at least 2 GiB free');
+    };
     let offset=Number(getMeta(db,'offset')),rows=Number(getMeta(db,'rows')),processed=0;
     const stream=fs.createReadStream(indexPathFor(index),{start:offset,highWaterMark:256*1024}),lines=createInterface({input:stream,crlfDelay:Infinity});
     const add=inserter(db),batch:string[]=[];
@@ -132,14 +144,14 @@ async function prepareSnapshot(index:string,seconds:number,maxRows:number) {
       for await(const p of lines) {
         if(p.length>1024*1024)throw new Error('Indexed path exceeds 1 MiB');
         offset+=Buffer.byteLength(p)+1;if(p){batch.push(p);rows++;processed++;}
-        if(batch.length>=1024){commit();if(fs.statSync(stage).size>6*1024**3)throw new Error('Search accelerator exceeds 6 GiB; use a narrower profile');await new Promise<void>(r=>setImmediate(r));}
+        if(batch.length>=1024){commit();if(rows>=nextSpaceCheck){checkDisk();nextSpaceCheck=rows+65536;}await new Promise<void>(r=>setImmediate(r));}
         if(processed>=maxRows||performance.now()>=deadline){finished=false;break;}
       }
       commit();
     } finally {lines.close();stream.destroy();}
     if(baseStamp(index)!==source)throw new Error('Path snapshot changed during preparation; retry to use the new snapshot');
     if(finished||offset>=fs.statSync(indexPathFor(index)).size) {
-      reuseMediaProperties(index,db);orderedIndexes(db);setMeta(db,'ready',1);db.exec('PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;');db.close();db=undefined;closeCached(index);fs.renameSync(stage,file);
+      checkDisk();reuseMediaProperties(index,db);orderedIndexes(db);checkDisk();setMeta(db,'ready',1);db.exec('PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;');db.close();db=undefined;closeCached(index);fs.renameSync(stage,file);
       return {...searchIndexStatus(index),processed,elapsedMs:Math.round(performance.now()-started)};
     }
     return {ready:false,index,processed,rows,bytesRead:offset,totalBytes:fs.statSync(indexPathFor(index)).size,elapsedMs:Math.round(performance.now()-started),resumable:true};

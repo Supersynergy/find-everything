@@ -188,11 +188,11 @@ const signature = (scope: Scope, opts: EngineOpts) => createHash("sha256").updat
 export const INDEX_TIMEOUT_MS = 120_000;
 export const SEARCH_TIMEOUT_MS = 10_000;
 // Flat indexes are streamed to disk, not retained in RAM. Bound disk use separately.
-export const INDEX_DISK_LIMIT_BYTES = 8 * 1024 ** 3;
-export const INDEX_FREE_RESERVE_BYTES = 256 * 1024 ** 2;
+export const INDEX_DISK_LIMIT_BYTES = 32 * 1024 ** 3;
+export const INDEX_FREE_RESERVE_BYTES = 2 * 1024 ** 3;
 export function indexByteBudget(freeBytes: number): number {
   if (!Number.isFinite(freeBytes) || freeBytes <= INDEX_FREE_RESERVE_BYTES) {
-    throw new Error("Not enough free disk space to build an index; keep at least 256 MiB free");
+    throw new Error("Not enough free disk space to build an index; keep at least 2 GiB free");
   }
   return Math.min(INDEX_DISK_LIMIT_BYTES, Math.floor(freeBytes - INDEX_FREE_RESERVE_BYTES));
 }

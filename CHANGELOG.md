@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2 — 2026-11-12
+
+- Fix a real full-disk rebuild stopping at 59,480,395 paths because the path snapshot crossed the fixed 8-GiB cap. Keep atomic publication and finite limits: up to 32 GiB for saved paths, bounded by initial free space minus 2 GiB.
+- Allow search preparation to grow beyond its former 6-GiB limit. Bound its main database and WAL to a 48-GiB budget, include existing checkpoints in free-space accounting, and check the 2-GiB free-space reserve during insertion and finalization. Preparation remains resumable.
+- Keep all query, permission, explicit-exclusion and display-filter behavior from 0.3.1. Capacity regressions cross the old threshold using byte accounting without allocating a large fixture.
+
 ## 0.3.1 — 2026-11-12
 
 - Add explicit inclusive indexing with `--exhaustive`, persisted across rebuilds and live updates. Include hidden/ignored/generated folders, Library, .local and mounted volumes; preserve explicit exclusions and permissions. Add native rebuild/show-all actions and show all indexed files by default for new preferences.
