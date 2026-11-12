@@ -1,4 +1,8 @@
-# Find Everything 0.3.1 · Apple Silicon preview
+# Find Everything 0.3.3 · Apple Silicon preview
+
+Apply large journals with up to one million changed paths. Indexed directory ranges avoid a full directory-table scan for every subtree deletion. Live updates preserve CR/LF filenames; the flat scan format still reports these as skipped until recovered through a live event. Each saved scope receives its own processing budget. See the [predicate benchmark](../BENCHMARKS-2026-11-13.md) for the isolated performance comparison and its limits.
+
+Version 0.3.2 increased the finite path budget to 32 GiB and the search-preparation budget to 48 GiB, each constrained by available space and a 2-GiB reserve. Preparation remains resumable and failed scans preserve the previous snapshot.
 
 Find files that a normal scan excludes, and search accented filenames consistently.
 
@@ -27,4 +31,4 @@ Use your existing index name in place of `work`. Existing snapshots acquire newl
 
 The archive is an **Apple Silicon, macOS 15+ preview, locally signed and not notarized**. Gatekeeper may refuse it; signing and checksums do not replace Apple notarization. Intel, older macOS and manual VoiceOver/interactive acceptance are unverified. Production screenshots remain synthetic offscreen renderings. Benchmarks use isolated saved paths and do not measure an entire disk.
 
-Permissions, explicit exclusions, resource limits, unsupported newline-containing paths and stale snapshots still bound coverage. All-index scans omit virtual filesystems and the duplicate `/System/Volumes/Data` tree; directory symlinks are not followed. No personal disk scan or document-body indexing is performed by the release checks. Optional sound models and search tools are not bundled. The previous previews remain available.
+Permissions, explicit exclusions, resource limits, scan-skipped CR/LF paths and stale snapshots still bound coverage. All-index scans omit virtual filesystems and the duplicate `/System/Volumes/Data` tree; directory symlinks are not followed. No personal disk scan or document-body indexing is performed by the release checks. Optional sound models and search tools are not bundled. The previous previews remain available.

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.3 — 2026-11-13
+
+- Use indexed, case-sensitive directory ranges when applying subtree deletions. Avoid scanning every directory for each deleted subtree; preserve Unicode spelling and sibling boundaries.
+- Raise the finite live-journal and lookup-sync bounds together from 100,000 to 1,000,000 paths. Count new keys rather than replacements against the overlay budget. Give each saved scope its own event-processing budget.
+- Keep CR/LF filenames in the NUL-delimited live updater and prepared lookup. The line-delimited scan snapshot still reports these as skipped; an existing path can be recovered through live events without changing the flat format.
+- Add regressions for more than 100,000 pending deltas, Unicode subtree boundaries and live CR/LF names, plus a synthetic Hyperfine comparison of the directory predicates.
+
 ## 0.3.2 — 2026-11-12
 
 - Fix a real full-disk rebuild stopping at 59,480,395 paths because the path snapshot crossed the fixed 8-GiB cap. Keep atomic publication and finite limits: up to 32 GiB for saved paths, bounded by initial free space minus 2 GiB.

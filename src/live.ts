@@ -7,7 +7,7 @@ import { createInterface } from "readline";
 import { Database } from "bun:sqlite";
 import { acquireLock, CONFIG_DIR } from "./catalog";
 import { scanExcludes, FD, HOME, INDEX_DIR, effectiveOptions, indexStatus, track } from "./engine";
-import { baseStamp, openLive, livePath } from "./delta";
+import { baseStamp, openLive, livePath, LIVE_PATH_LIMIT } from "./delta";
 import { repairMedia, mediaPath } from "./media";
 import { refreshSounds } from "./semantic";
 const exec = promisify(execFile);
@@ -55,7 +55,7 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
   }
   async function accepted(p: string, scope: typeof scopeList[number]): Promise<boolean> {
     const opts = effectiveOptions(scope.name), root = scope.paths.find(r => under(p,r));
-    if (!root || /[\r\n]/.test(p)) return false;
+    if (!root) return false;
     const relative = path.relative(root,p), parts = relative.split(path.sep);
     const exclusions = scanExcludes(scope.name,opts);
     if ((!opts.includeHidden && parts.some(s => s.startsWith("."))) || excluded(p,root,exclusions)) return false;
@@ -82,7 +82,7 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
     const task = exec(FD,[...args,"--","",p],{timeout:5000,maxBuffer:8*1024*1024,killSignal:"SIGKILL"}); track(task.child);
     const paths = (await task).stdout.split("\0").filter(Boolean).map(x => x.replace(/\/$/,""));
     if (paths.length > 20000) throw new Error("Changed subtree exceeds 20000 paths; explicit reconciliation required");
-    return paths.filter(x => !/[\r\n]/.test(x));
+    return paths;
   }
   async function flush() {
     if (stopped) return;
@@ -96,8 +96,8 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
         const staged: {scope:typeof scopeList[number];changes:Map<string,{present:number;tree:number}>;gap?:string}[] = [];
         const unique = new Map<string,Event>();
         for (const event of message.events) { const previous=unique.get(event.path); unique.set(event.path,{...event,scopes:event.scopes && previous?.scopes ? [...new Set([...event.scopes,...previous.scopes])] : event.scopes,flags:event.flags | (previous?.flags || 0)}); }
-        const deadline = performance.now()+5000;
         for (const scope of affected) {
+          const deadline = performance.now()+5000;
           const changes = new Map<string,{present:number;tree:number}>();
           let gap = message.gap;
           for (const event of unique.values()) {
@@ -152,7 +152,9 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
             }
           }
           const count = db.query("SELECT count(*) AS n FROM changes WHERE scope=?").get(scope.name).n;
-          if (count + changes.size > 100000) { gap = "Incremental overlay exceeds 100000 paths; explicit compaction required"; changes.clear(); }
+          let newPaths=0;
+          for(const p of changes.keys())if(!db.query('SELECT 1 FROM changes WHERE scope=? AND path=?').get(scope.name,p))newPaths++;
+          if (count + newPaths > LIVE_PATH_LIMIT) { gap = `Incremental overlay exceeds ${LIVE_PATH_LIMIT} paths; explicit compaction required`; changes.clear(); }
           staged.push({scope,changes,gap});
         }
         // Path deltas, durable metadata jobs and the shared root cursor commit together.

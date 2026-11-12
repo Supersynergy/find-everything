@@ -4,7 +4,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { acquireLock, validateName } from './catalog';
 import { INDEX_DIR, INDEX_FREE_RESERVE_BYTES, indexPathFor, ParsedQuery } from './engine';
-import { baseStamp, deltaFor, livePath } from './delta';
+import { baseStamp, deltaFor, livePath, LIVE_PATH_LIMIT } from './delta';
 import {omissionRules,omitted,NOISE_NAMES,NOISE_SUFFIXES} from './file-filters';
 import {relevanceOrder,relevanceScore} from './search-ranking';
 
@@ -182,7 +182,7 @@ export function syncSearch(index:string) {
     revision=state.revision;
     changes=live.query('SELECT path,present,tree,revision FROM changes WHERE scope=? AND revision>? ORDER BY revision,path').all(index,after);
   } finally {live.close();}
-  if(changes.length>100000)throw new Error('Search accelerator has over 100000 pending changes; prepare it again explicitly');
+  if(changes.length>LIVE_PATH_LIMIT)throw new Error(`Search accelerator has over ${LIVE_PATH_LIMIT} pending changes; prepare it again explicitly`);
   const file=searchIndexPath(index),release=acquireLock(file+'.lock');let db:Database|undefined;
   try {
     closeCached(index);closeProperties(index);db=new Database(file);tune(db);
@@ -193,7 +193,7 @@ export function syncSearch(index:string) {
     const metadata=db.query('UPDATE files SET size=?,mtime=?,dir=?,slash=CASE WHEN ?=0 THEN 0 ELSE slash END WHERE parent=(SELECT id FROM directories WHERE path=?) AND name=?');
     db.transaction(()=>{
       for(const c of changes){if(c.revision<=committed)continue;const s=splitPath(c.path);
-        if(c.tree){const prefix=c.path.replace(/\/$/,'')+'/';db.query('DELETE FROM files WHERE parent IN (SELECT id FROM directories WHERE substr(path,1,length(?))=?)').run(prefix,prefix);rowCount-=directChanges(db);}
+        if(c.tree){const prefix=c.path.replace(/\/$/,'')+'/';db.query('DELETE FROM files WHERE parent IN (SELECT id FROM directories WHERE path>=? AND path<?)').run(prefix,prefix.slice(0,-1)+'0');rowCount-=directChanges(db);}
         if(!c.present){remove.run(s.parent,s.name);rowCount-=directChanges(db);}
         else {rowCount+=add(c.path);try{const stat=fs.statSync(c.path),directory=Number(stat.isDirectory());metadata.run(stat.size,stat.mtimeMs,directory,directory,s.parent,s.name);}catch(e){if(!['ENOENT','ENOTDIR','EACCES','EPERM'].includes(e.code))throw e;}}
       }

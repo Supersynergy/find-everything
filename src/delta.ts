@@ -4,6 +4,9 @@ import * as path from "path";
 import { INDEX_DIR, indexPathFor } from "./engine";
 
 export const livePath = () => path.join(INDEX_DIR, "live.sqlite");
+// A full-disk snapshot can accumulate more than 100k changed paths while its
+// lookup is being prepared. Keep a finite, shared bound for writer and reader.
+export const LIVE_PATH_LIMIT = 1000000;
 export function baseStamp(index: string): string { const s = fs.statSync(indexPathFor(index)); return `${s.mtimeMs}:${s.size}`; }
 export function openLive(): Database {
   const db = new Database(livePath(), { create: true });
