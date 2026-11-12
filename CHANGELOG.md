@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.5 — 2026-11-13
+
+- Recheck directories when a live subtree scan fails. If a temporary directory disappeared or became a file, remove its old descendants and index its current state; retain genuine scanner and permission errors.
+- Replace a coalesced directory's descendants only after a complete successful scan, so deleted children do not remain searchable. Keep rescan bounds and preserve prefix siblings. Add deterministic disappearance, replacement and stale-child regressions.
+
 ## 0.3.4 — 2026-11-13
 
 - Coalesce pending events by path before checking the queue budget. More than 20,000 repeated notifications for a few paths no longer discard the replay; the finite limit still applies to 20,000 distinct pending paths per root.

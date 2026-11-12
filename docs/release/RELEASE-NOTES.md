@@ -1,4 +1,6 @@
-# Find Everything 0.3.4 · Apple Silicon preview
+# Find Everything 0.3.5 · Apple Silicon preview
+
+Live subtree updates now handle temporary directories disappearing or becoming files between inspection and traversal. Successful coalesced directory scans replace their previous descendants, removing stale files. Genuine scan errors remain visible; traversal and path budgets remain bounded. Deterministic regressions cover all three cases.
 
 Repeated notifications for the same path no longer exhaust the live-event queue. Coalesce flags and scope targets before enforcing its 20,000-distinct-path bound, including unscoped notifications that apply to every saved scope. A regression exercises 65,536 repeated events across two scopes.
 

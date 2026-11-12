@@ -84,6 +84,22 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
     if (paths.length > 20000) throw new Error("Changed subtree exceeds 20000 paths; explicit reconciliation required");
     return paths;
   }
+  async function rescan(p:string,scope:typeof scopeList[number],changes:Map<string,{present:number;tree:number}>) {
+    let paths:string[];
+    try {paths=await subtree(p,scope);}
+    catch(error){
+      // Temporary directories can vanish or become files after lstat. Their
+      // current state is authoritative; a genuine unreadable directory is a gap.
+      let now:fs.Stats;
+      try {now=fs.lstatSync(p);}catch(e){if(e.code==='ENOENT'||e.code==='ENOTDIR'){changes.set(p,{present:0,tree:1});return;}throw e;}
+      if(now.isDirectory())throw error;
+      changes.set(p,{present:1,tree:1});return;
+    }
+    // Replace only after a successful, complete scan. Adding alone leaves
+    // deleted descendants visible after coalesced directory notifications.
+    changes.set(p,{present:scope.paths.includes(p)?0:1,tree:1});
+    for(const sub of paths)changes.set(sub,{present:1,tree:0});
+  }
   async function flush() {
     if (stopped) return;
     if (running) { timer = setTimeout(() => void flush(),delay); return; }
@@ -110,8 +126,8 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
             // gap marker that only another full rebuild could have cleared.
             if (flags & 1) {
               let directory = false;
-              try { directory = fs.lstatSync(p).isDirectory(); } catch (e) { if (e.code !== "ENOENT" && e.code !== "ENOTDIR") gap = `Cannot read changed path: ${e.code}`; }
-              if (directory) { try { for (const sub of await subtree(p,scope)) changes.set(sub,{present:1,tree:0}); } catch (e) { gap = e.message; } }
+              try { directory = fs.lstatSync(p).isDirectory(); } catch (e) { if (e.code === "ENOENT" || e.code === "ENOTDIR") changes.set(p,{present:0,tree:1});else gap = `Cannot read changed path: ${e.code}`; }
+              if (directory) { try { await rescan(p,scope,changes); } catch (e) { gap = e.message; } }
               continue;
             }
             if (flags & 16 || !scope.paths.some(r => under(p,r))) continue; // HistoryDone
@@ -146,7 +162,7 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
             if (stat.isDirectory() && scope.paths.includes(p)) { gap="Root directory replaced; explicit reconciliation required"; continue; }
             changes.set(p,{present:1,tree:0});
             if (stat.isDirectory()) {
-              try { for (const sub of await subtree(p,scope)) changes.set(sub,{present:1,tree:0}); }
+              try { await rescan(p,scope,changes); }
               catch (e) { gap = e.message; }
             }
           }
