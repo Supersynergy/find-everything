@@ -20,6 +20,7 @@ const REMEDY='Run fe content index --index NAME explicitly; search never reads s
 type ContentQuery=ParsedQuery & {content?:string};
 type FileRow={path:string;size:number;mtime:number;ctime:number;ino:number;device:number;status:string;seen:string};
 type MatchRow=FileRow & {text:string;rank:number};
+export type CachedContentRecord=FileRow & {text:string};
 export const contentPath=(index:string)=>path.join(INDEX_DIR,`content-${validateName(index)}.sqlite`);
 
 function openCache(index:string,readonly=false):Database {
@@ -129,6 +130,33 @@ export function contentStatus(index:string) {
     const traversed=getMeta(db,'complete')==='1';
     return {exists:true,indexed:counts.indexed,skipped:counts.total-counts.indexed,pending:traversed?0:1,complete:current&&traversed&&counts.total===counts.indexed,snapshotCurrent:current};
   } finally {db.close();}
+}
+
+/** Bounded export of already extracted text; never opens source document bodies. */
+export function readCachedContent(index:string,limit:number) {
+  if(!Number.isInteger(limit)||limit<1||limit>10000)throw new Error('Use 1–10000 cached documents');
+  if(!fs.existsSync(contentPath(index)))throw new Error('Prepare document text first: fe content index --index NAME');
+  const source=sourceState(index),db=openCache(index,true);db.exec('BEGIN');
+  try {
+    if(getMeta(db,'source')!==source.stamp)throw new Error('Document cache is stale; run fe content index first');
+    const records=db.query("SELECT f.*,substr(b.body,1,6000) AS text FROM files f JOIN bodies b ON f.path=b.path WHERE f.seen=? AND f.status='ok' ORDER BY f.path LIMIT ?").all(source.stamp,limit+1) as CachedContentRecord[];
+    const revision=getMeta(db,'revision'),complete=getMeta(db,'complete')==='1';
+    if(sourceState(index).stamp!==source.stamp)throw new Error('Document snapshot changed during export');
+    return {records:records.slice(0,limit),limited:records.length>limit,complete,snapshot:`${source.stamp}:content:${revision}`};
+  }finally{db.exec('ROLLBACK');db.close();}
+}
+export function contentSnapshotId(index:string):string|null {
+  if(!fs.existsSync(contentPath(index)))return null;
+  const source=sourceState(index),db=openCache(index,true);
+  try {return getMeta(db,'source')===source.stamp?`${source.stamp}:content:${getMeta(db,'revision')}`:null;}
+  finally{db.close();}
+}
+export function matchesCachedContent(row:CachedContentRecord,pq:ParsedQuery):boolean {
+  const normalized=row.path.normalize('NFC');
+  if(pq.favorites&&!pq.favorites.includes(row.path)||omitted(row.path,pq.omit))return false;
+  if(!pq.constraints.every(c=>new RegExp(c.pattern,'i').test(normalized)!==c.negate)||!pq.fuzzy.every(t=>fuzzyMatches(normalized.toLowerCase(),t)))return false;
+  if(!matchesSize(row.size,pq.sizeFilter)||pq.dmFilter&&Date.now()-row.mtime>=pq.dmFilter.days*86400000)return false;
+  try {return sameFile(row,fs.lstatSync(row.path));}catch{return false;}
 }
 
 export async function indexContents(index:string,maxFiles=500,seconds=60,signal?:AbortSignal) {

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add optional `meaning:"…"` retrieval for explicitly prepared document and project-text caches, using a pinned local Gemma model. Keep filename, literal-content and audio search separate.
+- Preserve path/type/date/favorite filters, reject stale content, recheck source files after inference and publish complete vector indexes atomically. Interrupted budgeted builds retain a resumable checkpoint.
+- Add local setup/status/index/clear commands and a fresh German/English document benchmark. No model download or source-document scan occurs while searching.
+
 ## 0.3.8 — 2026-11-13
 
 - Use the existing media path index for live subtree cleanup. Avoid a complete media-table scan for every removed directory, and match non-BMP directory prefixes without mixing JavaScript UTF-16 lengths with SQLite character lengths.

@@ -20,6 +20,8 @@ import {changeFavorites} from './file-filters';
 import {updateLearning} from './search-learning';
 import {learningContext} from './search-ranking';
 import {indexContents,contentStatus,clearContents} from './content-search';
+import {indexMeaning,meaningStatus,clearMeaning} from './instantfind';
+import {setupInstantRuntime,instantRuntimeStatus,instantEncoder} from './instantfind-worker';
 import { startIndexJob, type IndexJob } from './index-progress';
 let activeIndexJob: IndexJob | undefined;
 let indexWorkerAbort: AbortController | undefined;
@@ -36,6 +38,7 @@ interface Flags {
   scope?: string; paths: string[]; name?: string; preset?: string; opts: EngineOpts;
   limit: number; json: boolean; nul: boolean; tui: boolean; fresh: boolean; progress: boolean;
   replace: boolean; names: boolean; port: number; interval: number; help: boolean; version: boolean;
+  model?:string;python?:string;
   socket?: string; snapshot: boolean; maxFiles: number; seconds: number; kind: string; idleSeconds: number; offset: number; parentBound: boolean; query: string; live?: boolean; liveIndexes: string[]; rows:number;sources:string[];
 }
 function numeric(value: string, name: string, min: number, max: number): number {
@@ -70,6 +73,8 @@ function parseFlags(argv: string[]): { pos: string[]; flags: Flags } {
         break;
       }
       case "--json": flags.json = true; break;
+      case "--model": flags.model=value();break;
+      case "--python": flags.python=value();break;
       case "--progress-json": flags.progress = true; break;
       case "--null": case "-0": flags.nul = true; break;
       case "--tui": flags.tui = true; break;
@@ -161,6 +166,10 @@ Examples:
   fe search 'engine ext:ts' --index hypersearch --json
   fe search 'invoice ext:pdf' --path ~/Documents/Invoices
 
+  fe instantfind setup --model PATH --python PATH   reuse a pinned local Gemma model
+  fe instantfind index|status|clear --index NAME    prepare meaning search from cached text
+  fe search 'meaning:"recover a failed release" ext:md' --index NAME
+
 Path indexes store names and paths; fe content index explicitly prepares local document full-text search.
   fe content index|status|clear --index NAME [--max-files 500 --seconds 60] [--json]
   fe search 'content:"quarterly revenue" ext:pdf' --index NAME --json
@@ -183,7 +192,7 @@ async function cmdSearch(q: string, flags: Flags): Promise<void> {
   if (flags.socket && (flags.paths.length || flags.fresh || Object.keys(flags.opts).length)) throw new Error("Socket searches use saved index settings; refresh separately or omit --socket");
   const result = flags.socket
     ? await socketRequest(flags.socket, `/v1/search?${new URLSearchParams({ q, index: scope, limit: String(flags.limit), offset: String(flags.offset) })}`)
-    : await searchFiles(q, scope, flags.limit, opts, flags.fresh, flags.snapshot, flags.offset).finally(closeSoundWorker);
+    : await searchFiles(q, scope, flags.limit, opts, flags.fresh, flags.snapshot, flags.offset).finally(()=>{closeSoundWorker();instantEncoder.close();});
   if (flags.json) return void console.log(JSON.stringify(result));
   for (const warning of result.warnings || []) console.error(`fe: ${warning}`);
   for (const p of result.paths) process.stdout.write(flags.tui ? `${p}\t${path.basename(p)}  ${path.dirname(p).replace(HOME, "~")}\n` : p + (flags.nul ? "\0" : "\n"));
@@ -313,6 +322,17 @@ async function main(): Promise<void> {
       const result = cmd === "repair-media" ? await repairMedia(scope, flags.maxFiles, flags.seconds) : await enrichMedia(scope, flags.maxFiles, flags.seconds, flags.kind);
       console.log(flags.json ? JSON.stringify(result) : `${scope}: ${"probed" in result ? result.probed : result.inspected} inspected · ${result.reused} reused · ${result.failed} failed · ${result.pending} pending`); return;
     }
+    case 'instantfind': {
+      const action=rest[0]||'status';
+      if(action==='setup') {
+        if(!flags.model||!flags.python)throw new Error('Use fe instantfind setup --model PATH --python PATH');
+        console.log(JSON.stringify(await setupInstantRuntime(flags.model,flags.python)));return;
+      }
+      const {scope}=selection(flags);
+      if(!['index','status','clear'].includes(action)||rest.length>1)throw new Error('Use fe instantfind setup|index|status|clear');
+      try {console.log(JSON.stringify(action==='index'?await indexMeaning(scope,flags.maxFiles,flags.seconds):action==='clear'?clearMeaning(scope):{...meaningStatus(scope),runtime:instantRuntimeStatus()}));}
+      finally{instantEncoder.close();}return;
+    }
     case 'content': {
       const {scope}=selection(flags);
       const action=rest[0]??'status';
@@ -380,7 +400,7 @@ async function main(): Promise<void> {
 for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => {
   if (activeIndexJob) { activeIndexJob.cancel(); return; }
   if (indexWorkerAbort) { indexWorkerAbort.abort(new Error('Indexing cancelled')); return; }
-  stopLive?.(); stopSetup(); closeSoundWorker(); stopChildren(); process.exit(signal === "SIGINT" ? 130 : 143);
+  stopLive?.(); stopSetup(); closeSoundWorker(); instantEncoder.close(); stopChildren(); process.exit(signal === "SIGINT" ? 130 : 143);
 });
 process.stdout.on("error", (e: NodeJS.ErrnoException) => { if (e.code === "EPIPE") {
   if (activeIndexJob) { activeIndexJob.cancel(); return; }

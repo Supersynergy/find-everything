@@ -18,6 +18,8 @@ import {learnedSelections,learningFile} from './search-learning';
 import {learningContext} from './search-ranking';
 import {createInterface} from 'node:readline';
 import {searchContents,contentPath} from './content-search';
+import {searchMeaning,meaningPath} from './instantfind';
+import {instantEncoder} from './instantfind-worker';
 
 export const VERSION = "0.3.8";
 function learningStamp(){try{const s=fs.statSync(learningFile());return `${s.mtimeMs}:${s.size}:${Math.floor(Date.now()/3600000)}`;}catch(e){if(e.code==='ENOENT')return 'none';throw e;}}
@@ -48,9 +50,14 @@ async function searchSnapshot(query: string, index: string, limit: number, optio
   const normalizedQuery = normalizeQuery(query);
   const parsed = parseQuery(normalizedQuery);
   const learningWarnings:string[]=[];
-  if(!parsed.semantic&&(parsed.smart&&!parsed.sort||parsed.sort==='relevance')&&parsed.learning!==false){try{parsed.learned=learnedSelections(learningContext(parsed),index,Math.floor(Date.now()/3600000)*3600000);}catch(e){learningWarnings.push(`Local learning unavailable: ${String(e.message).slice(0,200)}`);}}
+  if(!parsed.semantic&&!parsed.meaning&&(parsed.smart&&!parsed.sort||parsed.sort==='relevance')&&parsed.learning!==false){try{parsed.learned=learnedSelections(learningContext(parsed),index,Math.floor(Date.now()/3600000)*3600000);}catch(e){learningWarnings.push(`Local learning unavailable: ${String(e.message).slice(0,200)}`);}}
   const opts = effectiveOptions(index, options);
   const started = performance.now();
+  if(parsed.meaning!==undefined) {
+    if(fresh)throw new Error('Refresh document meaning explicitly with fe instantfind index --index NAME');
+    const result=await searchMeaning(index,parsed,limit,offset);
+    return {query,normalizedQuery,index,...result,stale:false,elapsedMs:Math.round(performance.now()-started)};
+  }
   if(parsed.content!==undefined) {
     if(fresh)throw new Error('Refresh document text explicitly with fe content index --index NAME');
     const result=await searchContents(index,parsed,limit,offset);
@@ -101,7 +108,7 @@ export async function serveSearchWorker(){
       if(Buffer.byteLength(body)>4*1024**2)body=JSON.stringify({id:request.id,error:'Search response exceeds 4 MiB'})+'\n';
       if(!process.stdout.write(body))await new Promise<void>(resolve=>process.stdout.once('drain',resolve));
     }
-  }finally{clearInterval(owner);closeSoundWorker();}
+  }finally{clearInterval(owner);closeSoundWorker();instantEncoder.close();}
 }
 
 function equalToken(actual: string, expected: string): boolean {
@@ -116,7 +123,7 @@ export function createApi(token: string, localSocket = false): http.Server & {ca
   const fingerprint = (file: string) => { try { const s = fs.statSync(file); return [s.mtimeMs, s.size, s.ino]; } catch (e) { if (e.code === 'ENOENT') return null; throw e; } };
   const cacheContext=(work:SearchWork)=>{
     const parsed=parseQuery(normalizeQuery(work.query)),index=work.index;
-    const regular=parsed.content===undefined&&!parsed.semantic&&!parsed.mediaFilters.length;
+    const regular=parsed.content===undefined&&parsed.meaning===undefined&&!parsed.semantic&&!parsed.mediaFilters.length;
     const prepared=regular?preparedRevision(index):undefined,liveRevision=liveRevisionFor(index);
     // Parsed structure shares only equivalent queries, retaining quoted spaces,
     // case and ordered terms. Each backend contributes its own dependencies.
@@ -125,12 +132,13 @@ export function createApi(token: string, localSocket = false): http.Server & {ca
       effectiveOptions(index),fingerprint(indexPathFor(index)),
       regular?[fingerprint(searchIndexPath(index)),prepared]:null,
       parsed.mediaFilters.length||parsed.semantic?fingerprint(mediaPath(index)):null,
-      parsed.content!==undefined?fingerprint(contentPath(index)):null,
+      parsed.content!==undefined||parsed.meaning!==undefined?fingerprint(contentPath(index)):null,
+      parsed.meaning!==undefined?fingerprint(meaningPath(index)):null,
       parsed.semantic?fingerprint(semanticPath(index)):null,
       liveRevision,fingerprint(learningFile()),parsed.favorites!==undefined?fingerprint(favoritesFile()):null]);
     return {key,prepared,liveRevision};
   };
-  const reader=new SearchProcess(undefined,work=>{const parsed=parseQuery(normalizeQuery(work.query));if(parsed.content===undefined&&!parsed.semantic&&!parsed.mediaFilters.length)syncSearch(work.index);},work=>cacheContext(work).key);
+  const reader=new SearchProcess(undefined,work=>{const parsed=parseQuery(normalizeQuery(work.query));if(parsed.content===undefined&&parsed.meaning===undefined&&!parsed.semantic&&!parsed.mediaFilters.length)syncSearch(work.index);},work=>cacheContext(work).key);
   reader.warm();
   const cache = new SearchCache<Awaited<ReturnType<typeof searchRaw>>>();
   const cachedSearch = async (work:SearchWork,signal:AbortSignal) => {
@@ -151,7 +159,7 @@ export function createApi(token: string, localSocket = false): http.Server & {ca
     // prepare() can apply journal changes before the worker reads. Cache under
     // that searched key only while it still describes the returned snapshot.
     const bound=data.engine!=='sqlite-trigram'||prepared&&prepared.live===current.liveRevision&&data.snapshotId.startsWith(`${prepared.source}:${prepared.live}:${prepared.properties}:`);
-    if(searched===current.key&&bound)cache.set(searched,data);
+    if(searched===current.key&&bound&&!data.instantfind)cache.set(searched,data);
     return { ...presentSearch({...data,query,normalizedQuery},index), cacheHit: false };
   };
   const server = http.createServer(async (req, res) => {

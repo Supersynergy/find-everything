@@ -11,6 +11,8 @@ swift build -c release --jobs 2 2>&1 | tail -3
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Helpers"
 cp .build/release/FindEverything "$APP/Contents/MacOS/FindEverything"
 cp ../dist-bin/fe "$APP/Contents/Helpers/fe"
+mkdir -p "$APP/Contents/Resources/instantfind"
+cp ../runtime/instantfind/worker.py "$APP/Contents/Resources/instantfind/worker.py"
 mkdir -p "$APP/Contents/Resources/Licenses"
 cp ../LICENSE ../THIRD-PARTY-NOTICES.md ../docs/release/BUN-LICENSE.md "$APP/Contents/Resources/Licenses/"
 swiftc -O MediaProbe.swift -o "$APP/Contents/Helpers/fe-media-probe"
