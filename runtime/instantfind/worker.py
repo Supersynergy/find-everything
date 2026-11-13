@@ -26,16 +26,23 @@ for line in sys.stdin:
         if not isinstance(texts,list) or not 1<=len(texts)<=4 or any(not isinstance(t,str) or not t.strip() or len(t)>8000 for t in texts):raise ValueError('Use 1–4 bounded texts')
         if request['kind'] not in ('query','document'):raise ValueError('Invalid embedding kind')
         prefix='task: search result | query: ' if request['kind']=='query' else ''
-        tokens=[tokenizer.encode(prefix+t) if compact else tokenizer.encode(prefix+t).ids for t in texts];width=max(map(len,tokens))
-        data={'input_ids':np.array([t+[0]*(width-len(t)) for t in tokens],dtype=np.int64),'attention_mask':np.array([[1]*len(t)+[0]*(width-len(t)) for t in tokens],dtype=np.int64)}
-        if 'position_ids' in inputs:data['position_ids']=np.broadcast_to(np.arange(data['input_ids'].shape[1],dtype=np.int64),data['input_ids'].shape)
-        if 'token_type_ids' in inputs:data['token_type_ids']=np.zeros_like(data['input_ids'])
-        values=session.run(None,data)
-        if 'sentence_embedding' in outputs:vectors=values[outputs.index('sentence_embedding')]
-        else:
-            hidden=values[0];mask=data['attention_mask'].astype(hidden.dtype)
-            vectors=(hidden*mask[:,:,None]).sum(1)/np.maximum(mask.sum(1)[:,None],1)
-        vectors/=np.maximum(np.linalg.norm(vectors,axis=1,keepdims=True),1e-12)
+        tokens=[tokenizer.encode(prefix+t) if compact else tokenizer.encode(prefix+t).ids for t in texts]
+        # Index documents one at a time: padding four long texts multiplies attention scratch RAM.
+        batches=[[t] for t in tokens] if request['kind']=='document' else [tokens]
+        collected=[]
+        for batch in batches:
+            width=max(map(len,batch))
+            data={'input_ids':np.array([t+[0]*(width-len(t)) for t in batch],dtype=np.int64),'attention_mask':np.array([[1]*len(t)+[0]*(width-len(t)) for t in batch],dtype=np.int64)}
+            if 'position_ids' in inputs:data['position_ids']=np.broadcast_to(np.arange(data['input_ids'].shape[1],dtype=np.int64),data['input_ids'].shape)
+            if 'token_type_ids' in inputs:data['token_type_ids']=np.zeros_like(data['input_ids'])
+            values=session.run(None,data)
+            if 'sentence_embedding' in outputs:vectors=values[outputs.index('sentence_embedding')]
+            else:
+                hidden=values[0];mask=data['attention_mask'].astype(hidden.dtype)
+                vectors=(hidden*mask[:,:,None]).sum(1)/np.maximum(mask.sum(1)[:,None],1)
+            vectors/=np.maximum(np.linalg.norm(vectors,axis=1,keepdims=True),1e-12)
+            collected.extend(vectors.astype(np.float32).tolist())
+        vectors=np.asarray(collected,dtype=np.float32)
         if vectors.shape!=(len(texts),768) or not np.isfinite(vectors).all():raise ValueError('Invalid model output')
         reply={'id':request['id'],'vectors':vectors.astype(np.float32).tolist(),'pid':os.getpid(),'setupMs':setup_ms,'peakRssMiB':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1048576}
     except Exception as error:

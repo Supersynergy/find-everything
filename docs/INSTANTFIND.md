@@ -106,6 +106,9 @@ Die lexikalische FTS-OR-Kontrolle erreichte 13/48, 22/48 und 31/48.
 Das Backend sank im gemessenen Lauf von 560,7 auf 177,6 MiB als Summe der
 Prozessspitzen. Der kompakte Tokenizer hält nur begrenzte Caches und liest BPE-Regeln
 aus SQLite, statt das vollständige Vokabular als große Laufzeitstruktur vorzuhalten.
+Beim Aufbau werden Dokumente nacheinander durch das Modell geführt. Ein
+zusätzlicher Test mit vier langen Texten senkte die Python-RAM-Spitze von
+464,1 auf 214,6 MiB; diese Aufbaumessung ist getrennt vom Such-RAM zu betrachten.
 Die Ergebnisse dieses begrenzten entwicklernahen Korpus sind kein Nachweis für
 beliebige persönliche Dokumente. Messdaten und Leerlaufprüfung liegen unter
 `/Users/master/BASE/data/fe-instantfind-real-20261113/`.
