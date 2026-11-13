@@ -21,8 +21,16 @@ export class SearchProcess {
  private sequence=0;
  private closed=false;
  private idle?:ReturnType<typeof setTimeout>;
+ private residentMeaning=false;
  private starts=0;private canceled=0;private completed=0;private retiredPid?:number;
  private readonly exit=()=>this.close();
+ private scheduleIdle(){
+  clearTimeout(this.idle);
+  // A successfully used document model belongs to the existing service, not a separate daemon.
+  // Keep it until service shutdown/cancellation; plain readers still retire after ten minutes.
+  if(this.residentMeaning)return;
+  this.idle=setTimeout(()=>this.retire(),IDLE_RETIRE_MS);this.idle.unref();
+ }
  constructor(private launch:()=>ChildProcess=()=>{
   const source=Bun.main.includes('$bunfs')?[]:[path.join(__dirname,'cli.ts')];
   return track(spawn(process.execPath,[...source,'_search-worker'],{
@@ -32,8 +40,8 @@ export class SearchProcess {
  canSync(){return !this.active&&!this.stopping;}
  /** Starts the reader ahead of the first keystroke so the first query skips the process start.
   * The same idle timer as after a search applies, so an unused warm reader still retires. */
- warm(){if(this.closed||this.stopping||this.child)return;this.start();clearTimeout(this.idle);this.idle=setTimeout(()=>this.retire(),IDLE_RETIRE_MS);this.idle.unref();}
- status(){return {pid:this.child?.pid??null,active:this.active?1:0,queued:this.queue.length,starts:this.starts,canceled:this.canceled,completed:this.completed,retiredPid:this.retiredPid??null};}
+ warm(){if(this.closed||this.stopping||this.child)return;this.start();this.scheduleIdle();}
+ status(){return {pid:this.child?.pid??null,active:this.active?1:0,queued:this.queue.length,starts:this.starts,canceled:this.canceled,completed:this.completed,residentMeaning:this.residentMeaning,retiredPid:this.retiredPid??null};}
  advance(work:SearchWork){
   if(work.client===undefined&&work.generation===undefined)return;
   if(!work.client||!/^[a-zA-Z0-9_-]{8,64}$/.test(work.client)||!Number.isSafeInteger(work.generation)||work.generation!<0)throw new Error('Invalid search client or generation');
@@ -93,7 +101,7 @@ export class SearchProcess {
   }catch(e){this.cancel(job,e);}
  }
  private start(){
-  const child=this.launch();this.child=child;this.starts++;
+  const child=this.launch();this.child=child;this.residentMeaning=false;this.starts++;
   let buffer='',errors='';child.stdout!.setEncoding('utf8');
   child.stdout!.on('data',chunk=>{
    if(this.child!==child)return;
@@ -106,8 +114,9 @@ export class SearchProcess {
      const reply=JSON.parse(line),job=this.active;
      if(!job||reply.id!==job.id)throw new Error('Invalid search worker response');
      this.active=undefined;
+     if(!reply.error&&reply.data?.instantfind&&reply.data?.runtime?.pid)this.residentMeaning=true;
      this.finish(job,reply.error?new Error(reply.error):undefined,reply.data);this.completed++;
-     this.idle=setTimeout(()=>this.retire(),IDLE_RETIRE_MS);this.idle.unref();this.drain();
+     this.scheduleIdle();this.drain();
     }catch(e){if(this.active)this.cancel(this.active,e);else this.retire();return;}
    }
   });
@@ -124,7 +133,7 @@ export class SearchProcess {
  private retire(){
   clearTimeout(this.idle);
   const child=this.child;if(!child)return;
-  this.child=undefined;this.retiredPid=child.pid;
+  this.child=undefined;this.residentMeaning=false;this.retiredPid=child.pid;
   // Reap the previous reader before starting another; never overlap SQL jobs.
   this.stopping=new Promise<void>(resolve=>child.once('close',resolve));
   this.stopping.then(()=>{this.stopping=undefined;this.drain()});

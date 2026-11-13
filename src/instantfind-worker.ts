@@ -11,7 +11,7 @@ const FILES:Record<string,string>={
   'tokenizer.json':'4dda02faaf32bc91031dc8c88457ac272b00c1016cc679757d1c441b248b9c47',
   'onnx/model_q4.onnx':'ad1dfee81a70f7944b9b9d1cc6e48075b832881cf33fab2f2b248be78f3f0043',
   'onnx/model_q4.onnx_data':'599962c3143b040de2dd05e5975be3e9091dd067cacc6a8f7186e3203bab9e02'};
-interface Configuration {modelId:string;model:string;python:string;files:Record<string,number>}
+interface Configuration {modelId:string;model:string;python:string;files:Record<string,number>;tokenizerBytes?:number}
 export interface EmbeddingReply {vectors:number[][];pid:number;setupMs:number;peakRssMiB:number}
 export interface DocumentEncoder {encode(texts:string[],kind:'query'|'document'):Promise<EmbeddingReply>}
 export const instantRuntime=()=>process.env.FE_INSTANTFIND_RUNTIME||path.join(os.homedir(),'Library/Application Support/FindEverything/instantfind');
@@ -22,7 +22,12 @@ function configuration():Configuration {
   const value=JSON.parse(fs.readFileSync(file,'utf8')) as Configuration;
   if(value.modelId!==INSTANT_MODEL||!path.isAbsolute(value.model)||!path.isAbsolute(value.python))throw new Error('Invalid instantfind configuration');
   for(const name of Object.keys(FILES))if(fs.statSync(path.join(value.model,name)).size!==value.files[name])throw new Error('Instantfind model changed; run setup again');
+  if(value.tokenizerBytes!==undefined){const tokenizer=fs.lstatSync(path.join(value.model,'tokenizer.sqlite'));if(!tokenizer.isFile()||tokenizer.isSymbolicLink()||tokenizer.mode&0o077||tokenizer.size!==value.tokenizerBytes)throw new Error('Compact tokenizer changed; run setup again');}
   return value;
+}
+function workerPath(){
+  const installed=path.resolve(path.dirname(fs.realpathSync(process.execPath)),'../Resources/instantfind/worker.py');
+  return process.env.FE_INSTANTFIND_WORKER||(fs.existsSync(installed)?installed:path.resolve(__dirname,'../runtime/instantfind/worker.py'));
 }
 export function instantRuntimeStatus(){
   try {const value=configuration();return {ready:true,model:INSTANT_MODEL,modelPath:value.model,python:value.python};}
@@ -30,8 +35,8 @@ export function instantRuntimeStatus(){
 }
 export async function setupInstantRuntime(model:string,python:string){
   if(!path.isAbsolute(model)||!path.isAbsolute(python))throw new Error('Use absolute --model and --python paths');
-  const probe=spawnSync(python,['-c','import numpy, onnxruntime, tokenizers; print(onnxruntime.__version__)'],{encoding:'utf8',timeout:15000});
-  if(probe.status!==0)throw new Error('The Python environment needs numpy, onnxruntime and tokenizers; no dependencies were installed');
+  const probe=spawnSync(python,['-c','import numpy, onnxruntime, sqlite3; print(onnxruntime.__version__)'],{encoding:'utf8',timeout:15000});
+  if(probe.status!==0)throw new Error('The Python environment needs numpy and onnxruntime; no dependencies were installed');
   const base=instantRuntime(),target=path.join(base,'models',randomUUID());
   fs.mkdirSync(target,{recursive:true,mode:0o700});const sizes:Record<string,number>={};
   try {
@@ -44,7 +49,11 @@ export async function setupInstantRuntime(model:string,python:string){
       if(copied.digest('hex')!==expected)throw new Error(`Model changed while copying: ${name}`);
       sizes[name]=fs.statSync(destination).size;
     }
-    const value:Configuration={modelId:INSTANT_MODEL,model:target,python,files:sizes};
+    const compact=path.join(target,'tokenizer.sqlite');
+    const prepare=spawnSync(python,[path.join(path.dirname(workerPath()),'compact_tokenizer.py'),path.join(target,'tokenizer.json'),compact],{encoding:'utf8',timeout:60000});
+    if(prepare.status!==0)throw new Error('Compact tokenizer preparation failed: '+(prepare.stderr||prepare.error?.message||'unknown error').slice(-600));
+    fs.chmodSync(compact,0o600);
+    const value:Configuration={modelId:INSTANT_MODEL,model:target,python,files:sizes,tokenizerBytes:fs.statSync(compact).size};
     const temporary=configFile()+'.'+randomUUID();fs.writeFileSync(temporary,JSON.stringify(value),{mode:0o600});fs.renameSync(temporary,configFile());
   }catch(error){fs.rmSync(target,{recursive:true,force:true});throw error;}
   return instantRuntimeStatus();
@@ -62,8 +71,7 @@ export class InstantFindWorker implements DocumentEncoder {
   }
   private start(){
     const config=configuration();
-    const installed=path.resolve(path.dirname(fs.realpathSync(process.execPath)),'../Resources/instantfind/worker.py');
-    const helper=process.env.FE_INSTANTFIND_WORKER||(fs.existsSync(installed)?installed:path.resolve(__dirname,'../runtime/instantfind/worker.py'));
+    const helper=workerPath();
     const child=track(spawn(config.python,[helper,config.model],{detached:process.platform!=='win32'&&process.env.FE_SEARCH_WORKER!=='1',stdio:['pipe','pipe','pipe'],env:{...process.env,OPENBLAS_NUM_THREADS:'1',OMP_NUM_THREADS:'2',TOKENIZERS_PARALLELISM:'false'}})) as ChildProcessWithoutNullStreams;
     this.child=child;this.buffer='';let errors='';child.stdout.setEncoding('utf8');
     child.stdout.on('data',(text:string)=>{

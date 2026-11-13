@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reduce Instantfind memory with a bounded SQLite BPE tokenizer while retaining the pinned model and existing vectors. Keep a successfully used document model in the app-owned reader across idle periods; plain readers still retire. Add a frozen real-file DE/EN comparison.
+
 - Add optional `meaning:"…"` retrieval for explicitly prepared document and project-text caches, using a pinned local Gemma model. Keep filename, literal-content and audio search separate.
 - Preserve path/type/date/favorite filters, reject stale content, recheck source files after inference and publish complete vector indexes atomically. Interrupted budgeted builds retain a resumable checkpoint.
 - Add local setup/status/index/clear commands and a fresh German/English document benchmark. No model download or source-document scan occurs while searching.

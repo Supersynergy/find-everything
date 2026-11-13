@@ -8,7 +8,11 @@ Der neue Weg ist optional und funktioniert im Suchfeld der App, über CLI und AP
 
 Es werden keine Bibliotheken oder Modellgewichte automatisch heruntergeladen.
 Die erste Einrichtung benötigt einen lokalen ONNX-Gemma-Q4-Export und eine
-Python-Umgebung mit `numpy`, `onnxruntime` und `tokenizers`.
+Python-Umgebung mit `numpy` und `onnxruntime`. Die Einrichtung erstellt aus dem
+gepinnten Tokenizer eine private SQLite-Tabelle für Vokabular und BPE-Regeln.
+Bereits eingerichtete alte Modelle funktionieren weiter; erneutes `setup` aktiviert
+die sparsame Variante. Die Modellgewichte und vorhandenen Dokumentvektoren bleiben
+kompatibel. Es wird nichts trainiert.
 
 ```sh
 fe instantfind setup --model /ABSOLUTER/PFAD/ZUM/MODELL --python /ABSOLUTER/PFAD/ZU/python
@@ -52,9 +56,10 @@ den Bedeutungsindex explizit aktualisieren. `--fresh` löst keine versteckte Ext
   Grenzen bleiben sichtbar; kein Vollständigkeitsbeweis für das Dateisystem.
 - Das Modell läuft lokal mit zwei CPU-Threads. Der Suchprozess hält es während
   seiner Lebensdauer wiederverwendbar; es gibt keinen zusätzlichen Systemdienst.
-- Nach zehn Minuten Inaktivität darf der bestehende Suchprozess enden. Dann fällt
-  beim nächsten Bedeutungsaufruf erneut ein Modellstart an. Dieser Fall wurde nicht
-  durch eine zehnminütige Messung als beseitigt nachgewiesen.
+- Nach einer erfolgreichen Bedeutungsanfrage bleibt der bestehende Suchprozess
+  einschließlich Modell bis zum Ende des Dienstes erhalten. Reine Dateisuchen
+  behalten ihre zehnminütige Leerlaufgrenze. Nach App-Neustart, Absturz oder Abbruch
+  eines laufenden Suchprozesses muss das Modell erneut geladen werden.
 - Für große Gesamtindizes ist dies keine Anweisung, jeden Pfad einzubetten.
   Bereiche gezielt auswählen; Millionenvektoren benötigen einen anderen Indexplan.
 
@@ -86,3 +91,21 @@ keine universelle Trefferquote. Die warme Suchzeit und Modellstartzeit werden
 getrennt angegeben. Der Gesamt-RAM-Wert ist die konservative Summe der jeweils
 größten beobachteten Bun- und Python-Prozesswerte; diese Spitzen müssen nicht
 gleichzeitig auftreten. Eine Pause von zehn Sekunden prüft nur kurze Inaktivität.
+
+
+## Vergleich mit echten Projektdateien
+
+Der zweite Test verwendet 42 unveränderte Dateien aus den vorhandenen Repositories
+Find Everything und Superskills. 48 neue Fragen, je 24 deutsch/englisch, samt
+Zieldateien und Quellen-Hashes wurden vor dem Test eingefroren. Keine künstlichen
+Dokumenttexte, kein Training und keine Änderung der Suchparameter anhand dieser
+Fragen. Vollständige Top-20-Listen waren zwischen altem und kompaktem Tokenizer
+identisch: 35/48 auf Platz 1, 43/48 unter den ersten 3, 48/48 unter den ersten 20.
+Die lexikalische FTS-OR-Kontrolle erreichte 13/48, 22/48 und 31/48.
+
+Das Backend sank im gemessenen Lauf von 560,7 auf 177,6 MiB als Summe der
+Prozessspitzen. Der kompakte Tokenizer hält nur begrenzte Caches und liest BPE-Regeln
+aus SQLite, statt das vollständige Vokabular als große Laufzeitstruktur vorzuhalten.
+Die Ergebnisse dieses begrenzten entwicklernahen Korpus sind kein Nachweis für
+beliebige persönliche Dokumente. Messdaten und Leerlaufprüfung liegen unter
+`/Users/master/BASE/data/fe-instantfind-real-20261113/`.
