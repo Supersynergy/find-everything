@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.9 — 2026-11-13
+
+- Move live event handling and metadata work into one owned worker process so those batches do not run on the API event loop. Reuse the existing process-group guardian to stop the worker and its helpers when the owning service exits.
+- Synchronize prepared search snapshots inside the disposable search reader. Bind cached responses to the returned snapshot while preserving non-snapshot query dependencies. Mark responses behind the journal as pending, and retain journal-gap warnings.
+- Recover a hot SQLite rollback journal before opening read-only lookup handles after an interrupted search writer. Add crash, ownership, pending-state and live replay regressions.
+
 ## 0.3.8 — 2026-11-13
 
 - Use the existing media path index for live subtree cleanup. Avoid a complete media-table scan for every removed directory, and match non-BMP directory prefixes without mixing JavaScript UTF-16 lengths with SQLite character lengths.

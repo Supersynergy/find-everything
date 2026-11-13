@@ -57,6 +57,14 @@ test('API caches isolate scopes/backends, canonicalize queries and bind post-syn
     fs.writeFileSync(a,'x'.repeat(50));db.query('INSERT INTO changes VALUES(?,?,1,0,2)').run('demo',a);db.exec("UPDATE scopes SET revision=2 WHERE name='demo'");
     const changed=await search('common sort:name');assert.equal(changed.properties.find((r:{path:string})=>r.path===a).size,50);assert.equal(changed.coverage.matched,2);
     assert.deepEqual((await search('common size:>10 sort:name')).paths,[a]);
+    const file=path.join(f.env.FE_DATA_DIR,'search-demo.sqlite');
+    const edit=(target:string,size:number)=>{const external=new Database(target);try{external.query('UPDATE files SET size=? WHERE name=?').run(size,'common.txt');}finally{external.close();}const stat=fs.statSync(target);fs.utimesSync(target,stat.atime,new Date(stat.mtimeMs+2000));};
+    edit(file,70);
+    const external=await search('common sort:name');assert.equal(external.cacheHit,false);assert.equal(external.properties.find((r:{path:string})=>r.path===a).size,70);
+    assert.equal((await search('common sort:name')).cacheHit,true);
+    const replacement=file+'.replacement';fs.copyFileSync(file,replacement);edit(replacement,90);fs.renameSync(replacement,file);
+    const replaced=await search('common sort:name');assert.equal(replaced.cacheHit,false);assert.equal(replaced.properties.find((r:{path:string})=>r.path===a).size,90);
+    assert.equal((await search('common sort:name')).cacheHit,true);
   }finally{
     db?.close();if(child?.exitCode===null){const exited=once(child,'exit');child.kill('SIGTERM');await exited;}
     fs.rmSync(f.dir,{recursive:true,force:true});

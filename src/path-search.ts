@@ -7,6 +7,7 @@ import { INDEX_DIR, INDEX_FREE_RESERVE_BYTES, indexPathFor, ParsedQuery } from '
 import { baseStamp, deltaFor, livePath, LIVE_PATH_LIMIT } from './delta';
 import {omissionRules,omitted,NOISE_NAMES,NOISE_SUFFIXES} from './file-filters';
 import {relevanceOrder,relevanceScore} from './search-ranking';
+import {preparedFileStamp} from './search-cache';
 
 export const searchIndexPath = (index:string) => path.join(INDEX_DIR,`search-${validateName(index)}.sqlite`);
 const VERSION='3';
@@ -17,7 +18,7 @@ export function searchByteBudget(freeBytes:number,currentBytes=0):number {
 }
 const FULL="d.path || f.name || CASE WHEN f.slash=1 THEN '/' ELSE '' END";
 type RowSet={table:string;count:number};
-const connections=new Map<string,{db:Database;stamp:string;revision:string;observedRevision:string;propertiesRevision:string;fileStamp:string;directoryCounts:Map<string,number>;counts:Map<string,{total:number;known:number;matched:number;properties?:boolean}>;sets:Map<string,RowSet|null>;seeds:Map<string,boolean>;sequence:number;directories:number;rows:number}>();
+const connections=new Map<string,{db:Database;stamp:string;inode:number;revision:string;observedRevision:string;propertiesRevision:string;fileStamp:string;directoryCounts:Map<string,number>;counts:Map<string,{total:number;known:number;matched:number;properties?:boolean}>;sets:Map<string,RowSet|null>;seeds:Map<string,boolean>;sequence:number;directories:number;rows:number}>();
 let propertyConnection:{index:string;stamp:string;db:Database}|undefined;
 const getMeta=(db:Database,key:string)=>db.query('SELECT value FROM meta WHERE key=?').get(key)?.value;
 const directChanges=(db:Database):number=>db.query('SELECT changes() AS n').get().n;
@@ -56,7 +57,7 @@ function openReady(index:string,normalized=false):Database|undefined {
     if(!(normalized?[VERSION]:['2',VERSION]).includes(getMeta(db,'version'))||getMeta(db,'source')!==baseStamp(index)||getMeta(db,'ready')!=='1'){db.close();return;}
     while(connections.size>=3)closeCached(connections.keys().next().value!);
     const stored=getMeta(db,'indexedRows'),valid=getMeta(db,'rowCountVersion')==='1'&&/^\d+$/.test(stored??'')&&Number.isSafeInteger(Number(stored));
-    const context={db,stamp,revision:'',observedRevision:'',propertiesRevision:'',fileStamp:'',directoryCounts:new Map<string,number>(),counts:new Map<string,{total:number;known:number;matched:number;properties?:boolean}>(),sets:new Map<string,RowSet|null>(),seeds:new Map<string,boolean>(),sequence:0,directories:-1,rows:valid?Number(stored):db.query('SELECT count(*) AS n FROM files').get().n};
+    const context={db,stamp,inode:s.ino,revision:'',observedRevision:'',propertiesRevision:'',fileStamp:'',directoryCounts:new Map<string,number>(),counts:new Map<string,{total:number;known:number;matched:number;properties?:boolean}>(),sets:new Map<string,RowSet|null>(),seeds:new Map<string,boolean>(),sequence:0,directories:-1,rows:valid?Number(stored):db.query('SELECT count(*) AS n FROM files').get().n};
     connections.set(index,context);return db;
   } catch(e){db.close();throw e;}
 }
@@ -177,6 +178,7 @@ export function cachedFileProperties(index:string,p:string) {
 export function preparedRevision(index:string):{source:string;live:number;properties:string}|undefined {
   let db:Database|undefined;
   try {
+    if(fs.existsSync(searchIndexPath(index)+'-journal'))return;
     db=openProperties(index);if(!db)return;
     db.exec('BEGIN');
     return {source:getMeta(db,'source'),live:Number(getMeta(db,'liveRevision')),properties:getMeta(db,'propertiesRevision')};
@@ -187,6 +189,14 @@ export function preparedRevision(index:string):{source:string;live:number;proper
 }
 
 export function syncSearch(index:string) {
+  const file=searchIndexPath(index);
+  // A canceled disposable reader may leave a hot rollback journal. Recover in
+  // a writable connection before opening the normal read-only snapshot handle.
+  if(fs.existsSync(file)&&fs.existsSync(file+'-journal')){
+    closeCached(index);closeProperties(index);
+    const recovery=new Database(file);
+    try{tune(recovery);recovery.query('SELECT value FROM meta WHERE key=?').get('source');}finally{recovery.close();}
+  }
   const current=openProperties(index);if(!current||!fs.existsSync(livePath()))return;
   const source=baseStamp(index),after=Number(getMeta(current,'liveRevision'));
   const live=new Database(livePath(),{readonly:true});let changes:any[],revision:number;
@@ -198,7 +208,7 @@ export function syncSearch(index:string) {
     changes=live.query('SELECT path,present,tree,revision FROM changes WHERE scope=? AND revision>? ORDER BY revision,path').all(index,after);
   } finally {live.close();}
   if(changes.length>LIVE_PATH_LIMIT)throw new Error(`Search accelerator has over ${LIVE_PATH_LIMIT} pending changes; prepare it again explicitly`);
-  const file=searchIndexPath(index),release=acquireLock(file+'.lock');let db:Database|undefined;
+  const release=acquireLock(file+'.lock');let db:Database|undefined;
   try {
     closeProperties(index);db=new Database(file);tune(db);
     if(getMeta(db,'source')!==source)return;
@@ -498,10 +508,12 @@ export function searchPrepared(index:string,pq:ParsedQuery,limit:number,offset:n
   } else rows=db.query(`SELECT ${FULL} AS path,f.size,f.mtime,f.dir${pageFrom} ORDER BY ${order} LIMIT ? OFFSET ?`).all(...args,pageLimit,pageOffset);
   if(reverse)rows.reverse();
   if(preview)return {paths:rows.map(r=>r.path),properties:rows,offset,nextOffset:null,
+    [preparedFileStamp]:JSON.stringify([s.mtimeMs,s.size,context.inode]),
     snapshotId:`${source}:${liveRevision}:${propertiesRevision}:${timeBucket}`,snapshot:true,complete:false,provisional:true,
     coverage:{indexed:context.rows,matched:null,metadataUnknown:null},engine:'sqlite-trigram',warnings:['Exact match count is pending.','Configured exclusions and macOS permissions apply.']};
   const unknown=coverage!.total-coverage!.known;
   return {paths:rows.map(r=>r.path),properties:rows,offset,nextOffset:offset+rows.length<matched?offset+rows.length:null,
+    [preparedFileStamp]:JSON.stringify([s.mtimeMs,s.size,context.inode]),
     snapshotId:`${source}:${liveRevision}:${propertiesRevision}:${timeBucket}`,snapshot:true,complete:unknown===0,
     coverage:{indexed:connections.get(index)!.rows,matched,metadataUnknown:unknown},engine:'sqlite-trigram',
     warnings:[...(unknown?[`${unknown} matching paths have unknown file properties; run fe properties --index ${index}.`]:[]),'Configured exclusions and macOS permissions apply.']};

@@ -14,6 +14,7 @@ import { QUERY_HELP,normalizeQuery } from "./smart-query";
 import { indexSounds, closeSoundWorker } from "./semantic";
 import { runtimeDir, semanticStatus } from "./semantic-worker";
 import { startLive } from "./live";
+import { serveLiveWorker } from './live-process';
 import { prepareSearch, indexProperties, searchIndexStatus } from './path-search';
 import {combineIndexes} from './combine';
 import {changeFavorites} from './file-filters';
@@ -276,6 +277,7 @@ async function main(): Promise<void> {
   if (flags.help || cmd === "help") return void console.log(HELP);
   switch (cmd) {
     case '_search-worker':return serveSearchWorker();
+    case '_live-worker':return serveLiveWorker(JSON.parse(rest[0]??'null'));
     case 'learn': {
       const action=rest[0]||'status';
       const parsed=parseQuery(normalizeQuery(flags.query));

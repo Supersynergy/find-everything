@@ -8,18 +8,18 @@ import { listenSocket, waitForSocketOwner } from "./socket";
 import { browse } from "./browse";
 import { searchSounds, semanticPath, closeSoundWorker } from "./semantic";
 import { liveRevisionFor, liveStatus } from "./delta";
-import { startLive } from "./live";
+import { startLiveProcess } from "./live-process";
 import {defaultIndex} from './catalog';
 import {favoritesFile} from './file-filters';
 import { searchPrepared, searchStreaming, syncSearch, searchIndexPath,prepareSearch,indexProperties,preparedRevision } from './path-search';
 import {SearchProcess,SearchWork,searchedCacheKey} from './search-process';
-import {SearchCache} from './search-cache';
+import {SearchCache,preparedFileStamp} from './search-cache';
 import {learnedSelections,learningFile} from './search-learning';
 import {learningContext} from './search-ranking';
 import {createInterface} from 'node:readline';
 import {searchContents,contentPath} from './content-search';
 
-export const VERSION = "0.3.8";
+export const VERSION = "0.3.9";
 function learningStamp(){try{const s=fs.statSync(learningFile());return `${s.mtimeMs}:${s.size}:${Math.floor(Date.now()/3600000)}`;}catch(e){if(e.code==='ENOENT')return 'none';throw e;}}
 
 /** Adds the watcher and age envelope. It stays separate from the snapshot body so a
@@ -29,8 +29,10 @@ export function presentSearch(result:any,index:string) {
   const live = liveStatus(index);
   const info=indexStatus().find(i=>i.name===index),configurationChanged=info?.configurationChanged ?? false,provenanceWarnings=info?.provenanceWarnings ?? [];
   const healthy = live.watching && !live.problem && !configurationChanged;
-  return {...result,live,stale:healthy ? false : result.stale,complete:result.complete && !live.problem && !configurationChanged && !provenanceWarnings.length,
-    warnings:[...result.warnings.filter((w:string) => !healthy || !w.startsWith("Path snapshot is old")),...(live.problem ? [live.problem] : []),...(configurationChanged ? [`Index settings changed; searching the existing snapshot. Reconcile explicitly with fe index --index ${index}.`] : []),...provenanceWarnings]};
+  const applied=result.engine==='sqlite-trigram'?String(result.snapshotId).match(/^[^:]+:[^:]+:(\d+):/)?.[1]:undefined;
+  const pending=applied!==undefined&&Number(applied)<live.revision;
+  return {...result,live,stale:pending?true:healthy ? false : result.stale,complete:result.complete && !pending && !live.problem && !configurationChanged && !provenanceWarnings.length,
+    warnings:[...result.warnings.filter((w:string) => !healthy || !w.startsWith("Path snapshot is old")),...(pending?['Live changes are pending; results show the last committed snapshot.']:[]),...(live.problem ? [live.problem] : []),...(configurationChanged ? [`Index settings changed; searching the existing snapshot. Reconcile explicitly with fe index --index ${index}.`] : []),...provenanceWarnings]};
 }
 
 export async function searchFiles(query: string, index = defaultIndex(), limit = 300, options: EngineOpts = {}, fresh = false, snapshot = false, offset = 0, synchronize = true,preview=false) {
@@ -94,8 +96,8 @@ export async function serveSearchWorker(){
       const request=JSON.parse(line);let reply:any;
       try {
         if(!Number.isSafeInteger(request.id)||!fs.existsSync(indexPathFor(request.index)))throw new Error('No saved index; create it explicitly before searching');
-        const data=await searchRaw(request.query,request.index,request.limit,{},false,true,request.offset,false,request.phase==='preview');
-        reply={id:request.id,data};
+        const data=await searchRaw(request.query,request.index,request.limit,{},false,true,request.offset,true,request.phase==='preview');
+        reply={id:request.id,data,preparedStamp:data[preparedFileStamp]};
       }catch(e){reply={id:request.id,error:String(e.message).slice(0,1000)};}
       let body=JSON.stringify(reply)+'\n';
       if(Buffer.byteLength(body)>4*1024**2)body=JSON.stringify({id:request.id,error:'Search response exceeds 4 MiB'})+'\n';
@@ -120,17 +122,18 @@ export function createApi(token: string, localSocket = false): http.Server & {ca
     const prepared=regular?preparedRevision(index):undefined,liveRevision=liveRevisionFor(index);
     // Parsed structure shares only equivalent queries, retaining quoted spaces,
     // case and ordered terms. Each backend contributes its own dependencies.
-    const key=JSON.stringify([parsed,index,work.limit,work.offset,work.phase,
+    const dependencies=JSON.stringify([parsed,index,work.limit,work.offset,work.phase,
       Math.floor(Date.now()/3600000),parsed.dmFilter?Math.floor(Date.now()/60000):0,
       effectiveOptions(index),fingerprint(indexPathFor(index)),
-      regular?[fingerprint(searchIndexPath(index)),prepared]:null,
       parsed.mediaFilters.length||parsed.semantic?fingerprint(mediaPath(index)):null,
       parsed.content!==undefined?fingerprint(contentPath(index)):null,
       parsed.semantic?fingerprint(semanticPath(index)):null,
-      liveRevision,fingerprint(learningFile()),parsed.favorites!==undefined?fingerprint(favoritesFile()):null]);
-    return {key,prepared,liveRevision};
+      fingerprint(learningFile()),parsed.favorites!==undefined?fingerprint(favoritesFile()):null]);
+    const preparedStamp=regular?fingerprint(searchIndexPath(index)):null;
+    const key=JSON.stringify([dependencies,regular?[preparedStamp,prepared,liveRevision]:liveRevision]);
+    return {key,dependencies,prepared,liveRevision,preparedStamp:JSON.stringify(preparedStamp)};
   };
-  const reader=new SearchProcess(undefined,work=>{const parsed=parseQuery(normalizeQuery(work.query));if(parsed.content===undefined&&!parsed.semantic&&!parsed.mediaFilters.length)syncSearch(work.index);},work=>cacheContext(work).key);
+  const reader=new SearchProcess(undefined,undefined,work=>cacheContext(work).key);
   reader.warm();
   const cache = new SearchCache<Awaited<ReturnType<typeof searchRaw>>>();
   const cachedSearch = async (work:SearchWork,signal:AbortSignal) => {
@@ -148,10 +151,10 @@ export function createApi(token: string, localSocket = false): http.Server & {ca
     const data = await reader.search(work,signal);
     const current=cacheContext(work),searched=data[searchedCacheKey];
     const prepared=current.prepared;
-    // prepare() can apply journal changes before the worker reads. Cache under
-    // that searched key only while it still describes the returned snapshot.
-    const bound=data.engine!=='sqlite-trigram'||prepared&&prepared.live===current.liveRevision&&data.snapshotId.startsWith(`${prepared.source}:${prepared.live}:${prepared.properties}:`);
-    if(searched===current.key&&bound)cache.set(searched,data);
+    // The child can synchronize before reading. Bind that returned snapshot to
+    // the current key only when all non-snapshot dependencies stayed unchanged.
+    const bound=data.engine==='sqlite-trigram'&&prepared&&prepared.live===current.liveRevision&&data[preparedFileStamp]===current.preparedStamp&&data.snapshotId.startsWith(`${prepared.source}:${prepared.live}:${prepared.properties}:`);
+    if(bound&&searched&&JSON.parse(searched)[0]===current.dependencies||data.engine!=='sqlite-trigram'&&searched===current.key)cache.set(current.key,data);
     return { ...presentSearch({...data,query,normalizedQuery},index), cacheHit: false };
   };
   const server = http.createServer(async (req, res) => {
@@ -220,7 +223,7 @@ export async function serveApi(port: number, socketPath?: string, idleSeconds = 
   server.on("request", resetIdle);
   server.on("close", () => clearTimeout(idleTimer));
   if (!live) resetIdle();
-  const stopLive = live ? await startLive(liveNames,300,server.canSyncSearch) : undefined;
+  const stopLive = live ? await startLiveProcess(liveNames,()=>server.close()) : undefined;
   server.once("close", () => stopLive?.());
   const ownerPid = parentBound ? process.ppid : undefined;
   if (ownerPid) {
