@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.43 — 2026-11-13
+
+- Reuse bounded passage embeddings within the resident model worker, retaining exact ranking, filters and source-version checks. Invalidate query and passage caches when the configured model/runtime identity changes or the worker closes.
+- Bound passage payloads to 512 entries / 2 MiB and query payloads to 128 entries / 1 MiB. Record cache reuse in search diagnostics without writing document text or a new disk cache.
+
 ## 0.3.42 — 2026-11-13
 
 - Refine document ranking with up to twelve query-selected late passages from the full-text cache. Keep snippets in SQLite until requested; preserve hard filters and original cosine scores. Split the pinned model graph from its token table and map only requested rows to reduce search memory without changing model vectors. Passage refinement adds query latency.

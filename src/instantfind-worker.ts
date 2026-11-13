@@ -4,6 +4,7 @@ import os from 'node:os';
 import {randomUUID,createHash} from 'node:crypto';
 import {spawn,spawnSync,ChildProcessWithoutNullStreams} from 'node:child_process';
 import {track} from './engine';
+import {EmbeddingCache} from './embedding-cache';
 
 export const INSTANT_MODEL='embeddinggemma-q4:5090578d9565bb06545b4552f76e6bc2c93e4a66:256:chunks-v1';
 const FILES:Record<string,string>={
@@ -12,7 +13,7 @@ const FILES:Record<string,string>={
   'onnx/model_q4.onnx':'ad1dfee81a70f7944b9b9d1cc6e48075b832881cf33fab2f2b248be78f3f0043',
   'onnx/model_q4.onnx_data':'599962c3143b040de2dd05e5975be3e9091dd067cacc6a8f7186e3203bab9e02'};
 interface Configuration {modelId:string;model:string;python:string;files:Record<string,number>;tokenizerBytes?:number;coreBytes?:number;coreDataBytes?:number}
-export interface EmbeddingReply {vectors:number[][];pid:number;setupMs:number;peakRssMiB:number}
+export interface EmbeddingReply {vectors:number[][];pid:number;setupMs:number;peakRssMiB:number;identity?:string}
 export interface DocumentEncoder {encode(texts:string[],kind:'query'|'document'|'passage'):Promise<EmbeddingReply>}
 export const instantRuntime=()=>process.env.FE_INSTANTFIND_RUNTIME||path.join(os.homedir(),'Library/Application Support/FindEverything/instantfind');
 const configFile=()=>path.join(instantRuntime(),'config.json');
@@ -29,6 +30,14 @@ function configuration():Configuration {
 function workerPath(){
   const installed=path.resolve(path.dirname(fs.realpathSync(process.execPath)),'../Resources/instantfind/worker.py');
   return process.env.FE_INSTANTFIND_WORKER||(fs.existsSync(installed)?installed:path.resolve(__dirname,'../runtime/instantfind/worker.py'));
+}
+function runtimeIdentity():string {
+  const c=configuration(),helper=workerPath();
+  const tokenizerHelper=path.join(path.dirname(helper),'compact_tokenizer.py');
+  const files=[configFile(),c.python,helper,tokenizerHelper,...Object.keys(FILES).map(n=>path.join(c.model,n))];
+  if(c.tokenizerBytes!==undefined)files.push(path.join(c.model,'tokenizer.sqlite'));
+  if(c.coreBytes!==undefined)files.push(path.join(c.model,'onnx/core.onnx'),path.join(c.model,'onnx/core.data'));
+  return createHash('sha256').update(JSON.stringify(files.map(file=>{try{const s=fs.statSync(file);return [file,s.dev,s.ino,s.size,s.mtimeMs,s.ctimeMs];}catch(error){if(file===tokenizerHelper&&error.code==='ENOENT')return [file,null];throw error;}}))).digest('hex');
 }
 export function instantRuntimeStatus(){
   try {const value=configuration();return {ready:true,model:INSTANT_MODEL,modelPath:value.model,python:value.python};}
@@ -62,6 +71,14 @@ export async function setupInstantRuntime(model:string,python:string){
   return instantRuntimeStatus();
 }
 export class InstantFindWorker implements DocumentEncoder {
+  private readonly passages=new EmbeddingCache();
+  private readonly queries=new EmbeddingCache(128,1024*1024);
+  private readonly reusePassages=process.env.FE_PASSAGE_CACHE!=='off';
+  private identity?:string;
+  private stats?:Omit<EmbeddingReply,'vectors'>;
+  private hits=0;private misses=0;
+  cacheStats(){return {hits:this.hits,misses:this.misses,entries:this.passages.size,bytes:this.passages.bytes};}
+  currentIdentity(){return runtimeIdentity();}
   private child?:ChildProcessWithoutNullStreams;
   private sequence=0;
   private pending?:{id:number;resolve:(reply:EmbeddingReply)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>};
@@ -96,14 +113,22 @@ export class InstantFindWorker implements DocumentEncoder {
   }
   private perform(texts:string[],kind:'query'|'document'|'passage'):Promise<EmbeddingReply>{
     if(!texts.length||texts.length>4||texts.some(t=>!t.trim()||t.length>8000))return Promise.reject(new Error('Use 1–4 bounded texts'));
+    const identity=runtimeIdentity();
+    if(this.identity!==identity){this.close();this.identity=identity;}
+    const cache=texts.length===1?(kind==='query'?this.queries:kind==='passage'&&this.reusePassages?this.passages:undefined):undefined;
+    const key=cache?createHash('sha256').update(JSON.stringify([INSTANT_MODEL,kind,texts[0]])).digest('hex'):undefined;
+    const reused=key&&this.child&&this.stats?cache?.get(key):undefined;
+    if(reused){if(kind==='passage')this.hits++;return Promise.resolve({...this.stats!,vectors:[Array.from(reused)]});}
+    if(kind==='passage')this.misses++;
     if(!this.child)this.start();
     const id=++this.sequence;
-    return new Promise((resolve,reject)=>{
+    return new Promise<EmbeddingReply>((resolve,reject)=>{
       const timer=setTimeout(()=>this.close(new Error('Instantfind model exceeded 30 seconds')),30000);
       this.pending={id,resolve,reject,timer};this.child!.stdin.write(JSON.stringify({id,kind,texts})+'\n');
-    });
+    }).then(reply=>{this.stats={pid:reply.pid,setupMs:reply.setupMs,peakRssMiB:reply.peakRssMiB,identity};if(key)cache!.set(key,reply.vectors[0]);return {...reply,identity};});
   }
   close(error=new Error('Instantfind worker closed')){
+    this.passages.clear();this.queries.clear();this.stats=undefined;
     const child=this.child;this.child=undefined;
     if(this.pending){clearTimeout(this.pending.timer);this.pending.reject(error);this.pending=undefined;}
     if(child&&child.exitCode===null){try{child.kill('SIGTERM');}catch{}}

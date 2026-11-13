@@ -103,6 +103,9 @@ test('query-focused passages expose late content without weakening filters',asyn
   expect(result.paths[0]).toBe(f.files[1]);expect(result.snippets[0].text).toContain('unique-late-anchor');
   const filtered=await meaning.searchMeaning(f.index,engine.parseQuery('meaning:"unique-late-anchor" name:a.md'),20,0,focused);
   expect(filtered.paths).toEqual([f.files[0]]);
+  const moving={async encode(texts:string[],kind:'query'|'document'|'passage'){const r=await focused.encode(texts);return {...r,identity:kind==='query'?'before':'after'};}};
+  const changed=await meaning.searchMeaning(f.index,engine.parseQuery('meaning:"unique-late-anchor"'),20,0,moving);
+  expect(changed.paths).toEqual([]);expect(changed.warnings[0]).toContain('runtime changed');
 });
 test('confident rare-word evidence resolves a tie while ordinary words keep semantic order',async()=>{
   const entries:Record<string,string>={};for(let i=0;i<99;i++)entries[String(i).padStart(3,'0')+'.md']='routine note';entries['z.md']='quartz saxophone hydrangea nebula';

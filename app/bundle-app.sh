@@ -41,8 +41,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>com.supersynergy.findeverything</string>
   <key>CFBundleExecutable</key><string>FindEverything</string>
   <key>CFBundleIconFile</key><string>icon</string>
-  <key>CFBundleVersion</key><string>0.3.42</string>
-  <key>CFBundleShortVersionString</key><string>0.3.42</string>
+  <key>CFBundleVersion</key><string>0.3.43</string>
+  <key>CFBundleShortVersionString</key><string>0.3.43</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSUIElement</key><true/>
   <key>LSMinimumSystemVersion</key><string>15.0</string>

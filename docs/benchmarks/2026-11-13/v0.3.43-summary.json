@@ -1,0 +1,127 @@
+{
+  "passed": true,
+  "knownReplay": true,
+  "cases": 40,
+  "pagesPerCase": 2,
+  "casesHash": "492481db5c35241f2204913bcdea5ebe505fb5cc166059ccae055afc8f0f59b8",
+  "corpusHash": "f49382b40130f4b05431d773b03c863fe310f70e2d62a2369b5d02e9c8009ab6",
+  "identicalResults": true,
+  "before": {
+    "nextPageMedianMs": 382.0256665000006,
+    "firstPageMedianMs": 446.10797900000034,
+    "totalPeakUpperMiB": 190.171875,
+    "encoded": 774
+  },
+  "after": {
+    "nextPageMedianMs": 65.48729200000008,
+    "firstPageMedianMs": 400.38506200000006,
+    "totalPeakUpperMiB": 187.84375,
+    "encoded": 354,
+    "hits": 420
+  },
+  "hyperfine": {
+    "warmups": 1,
+    "runs": 3,
+    "questionsPerCommand": 8,
+    "pagesPerQuestion": 2,
+    "results": [
+      {
+        "version": "0.3.42",
+        "wall": {
+          "unit": "second",
+          "count": 3,
+          "mean": 7.704749180666667,
+          "stddev": 1.6614080531007571,
+          "median": 7.085347084,
+          "min": 6.442021375,
+          "max": 9.586879083
+        },
+        "cpu": {
+          "unit": "second",
+          "count": 3,
+          "mean": 9.052935333333332,
+          "stddev": 0.19997458967662146,
+          "median": 9.046888,
+          "min": 8.856053,
+          "max": 9.255864999999998
+        },
+        "samples": [
+          {
+            "wallSeconds": 6.442021375,
+            "cpuSeconds": 8.856053
+          },
+          {
+            "wallSeconds": 9.586879083,
+            "cpuSeconds": 9.046888
+          },
+          {
+            "wallSeconds": 7.085347084,
+            "cpuSeconds": 9.255864999999998
+          }
+        ]
+      },
+      {
+        "version": "0.3.43",
+        "wall": {
+          "unit": "second",
+          "count": 3,
+          "mean": 3.9098259166666662,
+          "stddev": 0.06675774445968788,
+          "median": 3.941250208,
+          "min": 3.833154917,
+          "max": 3.955072625
+        },
+        "cpu": {
+          "unit": "second",
+          "count": 3,
+          "mean": 5.130833333333333,
+          "stddev": 0.02637290564828449,
+          "median": 5.142867,
+          "min": 5.10059,
+          "max": 5.149043
+        },
+        "samples": [
+          {
+            "wallSeconds": 3.833154917,
+            "cpuSeconds": 5.149043
+          },
+          {
+            "wallSeconds": 3.941250208,
+            "cpuSeconds": 5.142867
+          },
+          {
+            "wallSeconds": 3.955072625,
+            "cpuSeconds": 5.10059
+          }
+        ]
+      }
+    ]
+  },
+  "limits": [
+    "Known 40-question replay; not another blind evaluation",
+    "Same prepared 497-document corpus, model and vectors",
+    "Hyperfine includes startup and eight two-page queries per command",
+    "Native UI and API response caching are not measured",
+    "Memory is summed process peaks; cache payload is bounded separately"
+  ],
+  "installed": {
+    "version": "0.3.43",
+    "nativeRssMiB": [
+      93.796875,
+      100.203125,
+      102.609375,
+      103.3125
+    ],
+    "cacheHits": 7,
+    "encodedPassages": 0,
+    "identicalPages": true
+  },
+  "implementation": {
+    "src/instantfind.ts": "ef451e59afacfbe117a39f811adb66594fa62aec40ae298b144dbb7d6808bc03",
+    "src/instantfind-worker.ts": "7add24deb0abb21f5f2460def4052e7ff9501f051b524d6fff1c45fcfabd8ec9",
+    "src/embedding-cache.ts": "453adb4913398e93a721c7681d3ee746ab11e3239acbeb515cb49a6fb31f986c",
+    "runtime/instantfind/worker.py": "8928a76797de4d6a1b147d87322b9210d562f7b6deb10936e1956ae0c48680c2",
+    "runtime/instantfind/compact_tokenizer.py": "f66ca207f8870fe6f3310feed5d1165be106048fe54fafedbfe2a15678e4690a",
+    "scripts/bench-passage-cache.ts": "e7507f3ecf0799668d7b68b9b89979422c1d002e4923920922f0b2ae2d35801d"
+  }
+}

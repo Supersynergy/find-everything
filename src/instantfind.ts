@@ -12,7 +12,6 @@ export const meaningPath=(index:string)=>path.join(INDEX_DIR,`meaning-${validate
 type Chunk={path:string;position:number;hash:string;vector:Float32Array};
 type Stored={snapshot:string;revision:string;limited:boolean;sourceComplete:boolean;documents:Map<string,CachedContentRecord>;chunks:Chunk[]};
 let cached:{file:string;stamp:string;value:Stored}|undefined;
-const queries=new Map<string,EmbeddingReply>();
 function open(file:string,readonly=true){
   const stat=fs.lstatSync(file);
   if(!stat.isFile()||stat.isSymbolicLink()||stat.mode&0o077||process.getuid&&stat.uid!==process.getuid())throw new Error('Unsafe instantfind index');
@@ -101,9 +100,8 @@ export async function searchMeaning(index:string,pq:ParsedQuery,limit:number,off
   if(contentSnapshotId(index)!==data.snapshot)return empty('Instantfind index is stale; refresh document contents and meaning explicitly');
   if(encoder===instantEncoder&&!instantRuntimeStatus().ready)return empty('Instantfind runtime is unavailable; run fe instantfind setup --model PATH --python PATH');
   const documents=new Map([...data.documents].filter(([,row])=>matchesCachedContent(row,pq)));
-  const key=INSTANT_MODEL+'\n'+pq.meaning;
-  let encoded=encoder===instantEncoder?queries.get(key):undefined;
-  if(!encoded){encoded=await encoder.encode([pq.meaning],'query');if(encoder===instantEncoder){if(queries.size>=128)queries.delete(queries.keys().next().value!);queries.set(key,encoded);}}
+  const before=encoder===instantEncoder?instantEncoder.cacheStats():undefined;
+  const encoded=await encoder.encode([pq.meaning],'query');
   const vector=encoded.vectors[0];if(vector.length!==DIMENSIONS)throw new Error('Invalid query embedding');
   const best=new Map<string,{path:string;score:number;rankScore:number;position:number;exact:boolean;passage?:string}>();
   for(const chunk of data.chunks){
@@ -117,6 +115,7 @@ export async function searchMeaning(index:string,pq:ParsedQuery,limit:number,off
   const {passages,lexical}=meaningPassages(index,pq.meaning,new Set(best.keys()));
   for(const passage of passages){
     const embedded=await encoder.encode([passage.text],'passage');
+    if(encoded.identity!==embedded.identity)return empty('Instantfind runtime changed during search; retry with the current model');
     peakRssMiB=Math.max(peakRssMiB,embedded.peakRssMiB);
     const v=embedded.vectors[0];if(v.length!==DIMENSIONS||!v.every(Number.isFinite))throw new Error('Invalid passage embedding');
     let score=0;for(let i=0;i<DIMENSIONS;i++)score+=vector[i]*v[i];
@@ -131,9 +130,10 @@ export async function searchMeaning(index:string,pq:ParsedQuery,limit:number,off
   try {const text=snippetsDb.query('SELECT substr(text,1,700) AS text FROM chunks WHERE path=? AND position=?');snippets=selected.map(row=>({path:row.path,text:row.passage||(text.get(row.path,row.position) as {text:string}|null)?.text||''}));}finally{snippetsDb.close();}
   const current=fs.statSync(meaningPath(index));
   if(contentSnapshotId(index)!==data.snapshot||`${current.ino}:${current.size}:${current.mtimeMs}:${current.ctimeMs}`!==data.revision)return empty('Document cache changed during search; retry after refreshing');
+  if(encoder===instantEncoder&&encoded.identity!==instantEncoder.currentIdentity())return empty('Instantfind runtime changed during search; retry with the current model');
   return {paths:selected.map(r=>r.path),scores:selected.map(({path,score})=>({path,similarity:score})),snippets,
     properties:selected.map(r=>({path:r.path,size:documents.get(r.path)!.size,mtime:documents.get(r.path)!.mtime,dir:0})),
     complete:false,instantfind:true,snapshot:true,snapshotId:data.snapshot+':'+INSTANT_MODEL+':'+data.revision,offset,nextOffset:offset+selected.length<currentMatches.length?offset+selected.length:null,
-    coverage:{indexed:data.documents.size,eligible:documents.size,matched:currentMatches.length,limited:data.limited},runtime:{pid:encoded.pid,setupMs:encoded.setupMs,peakRssMiB,refinedPassages:passages.length},
+    coverage:{indexed:data.documents.size,eligible:documents.size,matched:currentMatches.length,limited:data.limited},runtime:{pid:encoded.pid,setupMs:encoded.setupMs,peakRssMiB,refinedPassages:passages.length,...(before?{passageCacheHits:instantEncoder.cacheStats().hits-before.hits,encodedPassages:instantEncoder.cacheStats().misses-before.misses,passageCacheBytes:instantEncoder.cacheStats().bytes}:{})},
     warnings:['Approximate meaning search over cached document excerpts; not exhaustive. Changed or filtered files are excluded.',...(data.limited?['Document preparation limit reached; narrow the index or increase its explicit budget.']:[])]};
 }
