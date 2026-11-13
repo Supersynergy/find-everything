@@ -1,0 +1,32 @@
+{
+  "passed": true,
+  "rows": 500000,
+  "requestsPerTrace": 8,
+  "runs": 3,
+  "warmup": 1,
+  "fixtureSha256": "69c60a52049d53c50578cdad0c8692635d7fe58f8e4344d9da1a7254114e8d66",
+  "baselineSha256": "2dd2a80f288b414b97551cd47c698972f4a348b5c7785f29dbd039ab275005b9",
+  "candidateSha256": "129e4190838b3f0090ac9c35f3a0a5bd4bf6900104bad70c8cc6e8ce3520f879",
+  "measurements": {
+    "other-scope": {
+      "baselineMs": 196.28159700000003,
+      "candidateMs": 127.55734733333335,
+      "speedup": 1.5387713926589914,
+      "baselineStddevMs": 14.604822091195192,
+      "candidateStddevMs": 5.52154361578774
+    },
+    "properties": {
+      "baselineMs": 456.6842916666667,
+      "candidateMs": 249.3415,
+      "speedup": 1.8315614996567626,
+      "baselineStddevMs": 73.35302984354138,
+      "candidateStddevMs": 34.96640260017165
+    }
+  },
+  "limits": [
+    "Synthetic frozen path list; no filesystem scan during queries",
+    "Each command includes service startup and one cold warmup query",
+    "Per-request warm timings retained in trace JSONL",
+    "OS file cache uncontrolled; no native-UI or 68-million-row performance claim"
+  ]
+}

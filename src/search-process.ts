@@ -4,10 +4,12 @@ import {track} from './engine';
 declare const Bun:{main:string};
 
 export const searchCanceled=()=>Object.assign(new Error('Search superseded or canceled'),{status:409,code:'SEARCH_CANCELED'});
+export const searchedCacheKey=Symbol('searchedCacheKey');
 const IDLE_RETIRE_MS=600000;
 const busy=()=>Object.assign(new Error('Search queue is full; retry after current requests finish'),{status:503});
 export type SearchWork={query:string;index:string;limit:number;offset:number;client?:string;generation?:number;priority?:string;phase?:string};
-type Job={id:number;work:SearchWork;resolve:(data:any)=>void;reject:(error:Error)=>void;cleanup:()=>void};
+type Caller={work:SearchWork;resolve:(data:any)=>void;reject:(error:Error)=>void;cleanup:()=>void};
+type Job={id:number;work:SearchWork;key?:string;callers:Set<Caller>;cleanup:()=>void};
 
 /** One reusable, disposable reader. Live index writes stay in the service. */
 export class SearchProcess {
@@ -26,7 +28,7 @@ export class SearchProcess {
   return track(spawn(process.execPath,[...source,'_search-worker'],{
    detached:process.platform!=='win32',stdio:['pipe','pipe','pipe'],env:{...process.env,FE_SEARCH_WORKER:'1',FE_SEARCH_OWNER_PID:String(process.pid)}
   }));
- },private prepare:(work:SearchWork)=>void=()=>{}){process.once('exit',this.exit);}
+ },private prepare:(work:SearchWork)=>void=()=>{},private keyFor?:(work:SearchWork)=>string){process.once('exit',this.exit);}
  canSync(){return !this.active&&!this.stopping;}
  /** Starts the reader ahead of the first keystroke so the first query skips the process start.
   * The same idle timer as after a search applies, so an unused warm reader still retires. */
@@ -40,27 +42,40 @@ export class SearchProcess {
   if(previous===undefined){
    for(const key of this.clients.keys()){
     if(this.clients.size<64)break;
-    if(this.active?.work.client!==key&&!this.queue.some(j=>j.work.client===key))this.clients.delete(key);
+    if(![...this.queue,...(this.active?[this.active]:[])].some(j=>[...j.callers].some(c=>c.work.client===key)))this.clients.delete(key);
    }
    if(this.clients.size>=64)throw busy();
   }
   this.clients.delete(work.client);this.clients.set(work.client,work.generation!);
-  for(const job of [...this.queue,...(this.active?[this.active]:[])])if(job.work.client===work.client&&job.work.generation!<work.generation!)this.cancel(job);
+  for(const job of [...this.queue,...(this.active?[this.active]:[])])for(const caller of [...job.callers]){
+   if(caller.work.client===work.client&&(caller.work.generation!<work.generation!||(work.priority==='foreground'&&caller.work.priority==='prefetch')))this.cancelCaller(job,caller);
+  }
  }
  search(work:SearchWork,signal:AbortSignal):Promise<any>{
   if(this.closed)return Promise.reject(new Error('Search service is closing'));
   this.advance(work);
   if(signal.aborted)return Promise.reject(searchCanceled());
-  // Foreground work can discard its own same-generation prefetch.
-  if(work.priority==='foreground')for(const job of [...this.queue,...(this.active?[this.active]:[])])if(job.work.client===work.client&&work.client&&job.work.priority==='prefetch')this.cancel(job);
-  if(this.queue.length+(this.active?1:0)>=2)return Promise.reject(busy());
+  const key=this.keyFor?.(work);
+  const shared=key===undefined?undefined:[...this.queue,...(this.active?[this.active]:[])].find(j=>j.key===key);
+  if(shared?.callers.size>=64||!shared&&this.queue.length+(this.active?1:0)>=2)return Promise.reject(busy());
   return new Promise((resolve,reject)=>{
-   const job:Job={id:++this.sequence,work,resolve,reject,cleanup:()=>{clearTimeout(timer);signal.removeEventListener('abort',abort)}};
-   const abort=()=>this.cancel(job),timer=setTimeout(()=>this.cancel(job,new Error('Search exceeded 12 seconds')),12000);
-   signal.addEventListener('abort',abort,{once:true});this.queue.push(job);this.drain();
+   const job:Job=shared??{id:++this.sequence,work,key,callers:new Set(),cleanup:()=>{}};
+   const caller:Caller={work,resolve,reject,cleanup:()=>signal.removeEventListener('abort',abort)};
+   const abort=()=>this.cancelCaller(job,caller);
+   job.callers.add(caller);signal.addEventListener('abort',abort,{once:true});
+   if(!shared){const timer=setTimeout(()=>this.cancel(job,new Error('Search exceeded 12 seconds')),12000);job.cleanup=()=>clearTimeout(timer);this.queue.push(job);this.drain();}
   });
  }
- private finish(job:Job,error?:Error,data?:any){job.cleanup();if(error)job.reject(error);else job.resolve(data);}
+ private finish(job:Job,error?:Error,data?:any){
+  job.cleanup();
+  if(data&&typeof data==='object'&&job.key!==undefined)Object.defineProperty(data,searchedCacheKey,{value:job.key});
+  for(const caller of job.callers){caller.cleanup();if(error)caller.reject(error);else caller.resolve(data);}job.callers.clear();
+ }
+ private cancelCaller(job:Job,caller:Caller){
+  if(!job.callers.delete(caller))return;
+  caller.cleanup();caller.reject(searchCanceled());
+  if(!job.callers.size)this.cancel(job);
+ }
  private cancel(job:Job,error:Error=searchCanceled()){
   if(this.active===job){this.active=undefined;this.canceled++;this.finish(job,error);this.retire();}
   else {const i=this.queue.indexOf(job);if(i<0)return;this.queue.splice(i,1);this.canceled++;this.finish(job,error);}
@@ -72,6 +87,7 @@ export class SearchProcess {
   const job=this.queue.shift()!;this.active=job;
   try {
    this.prepare(job.work);
+   job.key=this.keyFor?.(job.work);
    if(!this.child)this.start();
    this.child!.stdin!.write(JSON.stringify({id:job.id,...job.work})+'\n',error=>{if(error&&this.active===job)this.cancel(job,error)});
   }catch(e){this.cancel(job,e);}

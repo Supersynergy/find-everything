@@ -80,7 +80,7 @@ test('restarting the live service clears only the stale "Event stream stopped" m
   execFileSync(exe,[...prefix,'index',root,'--name','demo'],{env,encoding:'utf8',timeout:15000});
   const socket=path.join(dir,'service.sock');
   const spawnService=()=>{const p=spawn(exe,[...prefix,'serve','--socket',socket,'--live'],{env,stdio:['ignore','ignore','pipe']});p.stderr!.on('data',()=>{});return p;};
-  const problem=()=>{const db=new Database(path.join(env.FE_DATA_DIR,'live.sqlite'),{readonly:true});try{return (db.query("SELECT coalesce(problem,'') AS p FROM scopes WHERE name='demo'").get() as {p:string}).p;}finally{db.close();}};
+  const problem=()=>{const db=new Database(path.join(env.FE_DATA_DIR,'live.sqlite'),{readonly:true});try{db.exec('PRAGMA busy_timeout=1000');return (db.query("SELECT coalesce(problem,'') AS p FROM scopes WHERE name='demo'").get() as {p:string}).p;}finally{db.close();}};
   const waitFor=async(check:()=>boolean,ms:number)=>{const deadline=Date.now()+ms;while(Date.now()<deadline){if(check())return true;await new Promise(r=>setTimeout(r,80));}return false;};
   let service:ReturnType<typeof spawn>|undefined;
   try{

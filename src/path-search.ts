@@ -17,7 +17,7 @@ export function searchByteBudget(freeBytes:number,currentBytes=0):number {
 }
 const FULL="d.path || f.name || CASE WHEN f.slash=1 THEN '/' ELSE '' END";
 type RowSet={table:string;count:number};
-const connections=new Map<string,{db:Database;stamp:string;revision:string;directoryCounts:Map<string,number>;counts:Map<string,{total:number;known:number;matched:number}>;sets:Map<string,RowSet|null>;seeds:Map<string,boolean>;sequence:number;directories:number;rows:number}>();
+const connections=new Map<string,{db:Database;stamp:string;revision:string;observedRevision:string;propertiesRevision:string;fileStamp:string;directoryCounts:Map<string,number>;counts:Map<string,{total:number;known:number;matched:number;properties?:boolean}>;sets:Map<string,RowSet|null>;seeds:Map<string,boolean>;sequence:number;directories:number;rows:number}>();
 let propertyConnection:{index:string;stamp:string;db:Database}|undefined;
 const getMeta=(db:Database,key:string)=>db.query('SELECT value FROM meta WHERE key=?').get(key)?.value;
 const directChanges=(db:Database):number=>db.query('SELECT changes() AS n').get().n;
@@ -45,7 +45,9 @@ const damagedCache=(e:any)=>['SQLITE_CORRUPT','SQLITE_NOTADB'].includes(e.code)|
 function splitPath(p:string) {const clean=p.replace(/\/$/,'')||'/';return {parent:path.dirname(clean).replace(/\/$/,'')+'/',name:path.basename(clean),slash:p.endsWith('/')&&p!=='/'?1:0};}
 function openReady(index:string,normalized=false):Database|undefined {
   const file=searchIndexPath(index);if(!fs.existsSync(file))return;
-  const s=fs.statSync(file),stamp=`${s.mtimeMs}:${s.size}:${baseStamp(index)}`;
+  // Keep TEMP sets and SQLite pages across in-place metadata updates. An atomic
+  // replacement has a new inode; logical revisions are checked inside each read.
+  const s=fs.statSync(file),stamp=`${s.dev}:${s.ino}:${s.birthtimeMs}:${baseStamp(index)}`;
   const previous=connections.get(index);if(previous?.stamp===stamp&&(!normalized||getMeta(previous.db,'version')===VERSION)){connections.delete(index);connections.set(index,previous);return previous.db;}
   closeCached(index);
   const db=new Database(file,{readonly:true});
@@ -54,7 +56,7 @@ function openReady(index:string,normalized=false):Database|undefined {
     if(!(normalized?[VERSION]:['2',VERSION]).includes(getMeta(db,'version'))||getMeta(db,'source')!==baseStamp(index)||getMeta(db,'ready')!=='1'){db.close();return;}
     while(connections.size>=3)closeCached(connections.keys().next().value!);
     const stored=getMeta(db,'indexedRows'),valid=getMeta(db,'rowCountVersion')==='1'&&/^\d+$/.test(stored??'')&&Number.isSafeInteger(Number(stored));
-    const context={db,stamp,revision:'',directoryCounts:new Map<string,number>(),counts:new Map<string,{total:number;known:number;matched:number}>(),sets:new Map<string,RowSet|null>(),seeds:new Map<string,boolean>(),sequence:0,directories:-1,rows:valid?Number(stored):db.query('SELECT count(*) AS n FROM files').get().n};
+    const context={db,stamp,revision:'',observedRevision:'',propertiesRevision:'',fileStamp:'',directoryCounts:new Map<string,number>(),counts:new Map<string,{total:number;known:number;matched:number;properties?:boolean}>(),sets:new Map<string,RowSet|null>(),seeds:new Map<string,boolean>(),sequence:0,directories:-1,rows:valid?Number(stored):db.query('SELECT count(*) AS n FROM files').get().n};
     connections.set(index,context);return db;
   } catch(e){db.close();throw e;}
 }
@@ -171,6 +173,19 @@ export function cachedFileProperties(index:string,p:string) {
   return db.query('SELECT size,mtime,dir FROM files WHERE parent=(SELECT id FROM directories WHERE path=?) AND name=?').get(s.parent,s.name);
 }
 
+/** Read a coherent prepared snapshot identity without loading any path rows. */
+export function preparedRevision(index:string):{source:string;live:number;properties:string}|undefined {
+  let db:Database|undefined;
+  try {
+    db=openProperties(index);if(!db)return;
+    db.exec('BEGIN');
+    return {source:getMeta(db,'source'),live:Number(getMeta(db,'liveRevision')),properties:getMeta(db,'propertiesRevision')};
+  } catch(e) {
+    if(damagedCache(e)||/SQLITE_BUSY|database (table )?is locked/i.test(String(e.message)))return;
+    throw e;
+  } finally {if(db?.inTransaction)db.exec('ROLLBACK');}
+}
+
 export function syncSearch(index:string) {
   const current=openProperties(index);if(!current||!fs.existsSync(livePath()))return;
   const source=baseStamp(index),after=Number(getMeta(current,'liveRevision'));
@@ -185,18 +200,21 @@ export function syncSearch(index:string) {
   if(changes.length>LIVE_PATH_LIMIT)throw new Error(`Search accelerator has over ${LIVE_PATH_LIMIT} pending changes; prepare it again explicitly`);
   const file=searchIndexPath(index),release=acquireLock(file+'.lock');let db:Database|undefined;
   try {
-    closeCached(index);closeProperties(index);db=new Database(file);tune(db);
+    closeProperties(index);db=new Database(file);tune(db);
     if(getMeta(db,'source')!==source)return;
     const committed=Number(getMeta(db,'liveRevision'));if(committed>=revision)return;
     let rowCount=getMeta(db,'rowCountVersion')==='1'?Number(getMeta(db,'indexedRows')):db.query('SELECT count(*) AS n FROM files').get().n;
     const add=inserter(db),remove=db.query('DELETE FROM files WHERE parent=(SELECT id FROM directories WHERE path=?) AND name=?');
     const metadata=db.query('UPDATE files SET size=?,mtime=?,dir=?,slash=CASE WHEN ?=0 THEN 0 ELSE slash END WHERE parent=(SELECT id FROM directories WHERE path=?) AND name=?');
+    const previousSlash=db.query('SELECT slash FROM files WHERE parent=(SELECT id FROM directories WHERE path=?) AND name=?');
+    let namesChanged=false;
     db.transaction(()=>{
       for(const c of changes){if(c.revision<=committed)continue;const s=splitPath(c.path);
-        if(c.tree){const prefix=c.path.replace(/\/$/,'')+'/';db.query('DELETE FROM files WHERE parent IN (SELECT id FROM directories WHERE path>=? AND path<?)').run(prefix,prefix.slice(0,-1)+'0');rowCount-=directChanges(db);}
-        if(!c.present){remove.run(s.parent,s.name);rowCount-=directChanges(db);}
-        else {rowCount+=add(c.path);try{const stat=fs.statSync(c.path),directory=Number(stat.isDirectory());metadata.run(stat.size,stat.mtimeMs,directory,directory,s.parent,s.name);}catch(e){if(!['ENOENT','ENOTDIR','EACCES','EPERM'].includes(e.code))throw e;}}
+        if(c.tree){const prefix=c.path.replace(/\/$/,'')+'/';db.query('DELETE FROM files WHERE parent IN (SELECT id FROM directories WHERE path>=? AND path<?)').run(prefix,prefix.slice(0,-1)+'0');const removed=directChanges(db);rowCount-=removed;namesChanged=namesChanged||removed>0;}
+        if(!c.present){remove.run(s.parent,s.name);const removed=directChanges(db);rowCount-=removed;namesChanged=namesChanged||removed>0;}
+        else {const added=add(c.path);rowCount+=added;namesChanged=namesChanged||added>0;try{const stat=fs.statSync(c.path),directory=Number(stat.isDirectory());if(!directory&&!added&&previousSlash.get(s.parent,s.name)?.slash)namesChanged=true;metadata.run(stat.size,stat.mtimeMs,directory,directory,s.parent,s.name);}catch(e){if(!['ENOENT','ENOTDIR','EACCES','EPERM'].includes(e.code))throw e;}}
       }
+      setMeta(db,'namesRevision',Number(getMeta(db,'namesRevision')??committed)+(namesChanged?1:0));
       setMeta(db,'liveRevision',revision);setMeta(db,'propertiesRevision',Number(getMeta(db,'propertiesRevision'))+1);
       setMeta(db,'indexedRows',rowCount);
       setMeta(db,'rowCountVersion',1);
@@ -207,7 +225,7 @@ export function syncSearch(index:string) {
 export async function indexProperties(index:string,maxFiles=10000,seconds=60) {
   if(!openReady(index)){const result=await prepareSearch(index,seconds);if(!result.ready)return {...result,propertiesPending:true};}
   syncSearch(index);
-  const file=searchIndexPath(index),release=acquireLock(file+'.lock');closeCached(index);const db=new Database(file);tune(db);
+  const file=searchIndexPath(index),release=acquireLock(file+'.lock');const db=new Database(file);tune(db);
   const start=performance.now();let inspected=0,failed=0;
   try {
     const rows=db.query(`SELECT f.id,${FULL} AS path FROM files f JOIN directories d ON d.id=f.parent WHERE f.size IS NULL AND f.mtime IS NULL AND f.dir IS NULL LIMIT ?`).all(maxFiles);
@@ -376,14 +394,19 @@ export function searchPrepared(index:string,pq:ParsedQuery,limit:number,offset:n
   try {
   const source=getMeta(db,'source');if(source!==baseStamp(index))return;
   const liveRevision=getMeta(db,'liveRevision'),propertiesRevision=getMeta(db,'propertiesRevision');
-  const context=connections.get(index)!,revision=`${source}:${liveRevision}:${propertiesRevision}`;
-  if(context.revision!==revision){
+  const context=connections.get(index)!,revision=`${source}:${getMeta(db,'namesRevision')??liveRevision}`;
+  const observedRevision=`${source}:${liveRevision}:${propertiesRevision}`,s=fs.statSync(searchIndexPath(index)),fileStamp=`${s.mtimeMs}:${s.size}`;
+  // Unversioned external edits are conservatively treated as membership changes.
+  if(context.revision!==revision||(context.fileStamp!==fileStamp&&context.observedRevision===observedRevision)){
     const stored=getMeta(db,'indexedRows');
     context.rows=getMeta(db,'rowCountVersion')==='1'&&/^\d+$/.test(stored??'')?Number(stored):db.query('SELECT count(*) AS n FROM files').get().n;
     context.directories=-1;
     for(const set of context.sets.values())if(set)db.exec('DROP TABLE temp.'+set.table);
     context.directoryCounts.clear();context.counts.clear();context.sets.clear();context.seeds.clear();context.revision=revision;
+  } else if(context.propertiesRevision!==propertiesRevision){
+    for(const [key,value] of context.counts)if(value.properties)context.counts.delete(key);
   }
+  context.propertiesRevision=propertiesRevision;context.observedRevision=observedRevision;context.fileStamp=fileStamp;
   preview=preview&&offset===0&&pq.favorites===undefined;
   const plan=sqlPredicate(pq,db,index,preview);
   const from=' FROM files f JOIN directories d ON d.id=f.parent WHERE '+plan.sql;
@@ -412,7 +435,7 @@ export function searchPrepared(index:string,pq:ParsedQuery,limit:number,offset:n
     const value={total:total(),known:0};
     const knownFrom=value.total>10000?countFrom.replace(' FROM files f',` FROM files f INDEXED BY ${usesSize?'file_size':'file_modified'}`):countFrom;
     value.known=known==='1'?value.total:db.query(`SELECT count(*) AS n${knownFrom} AND ${known}`).get(...plan.args).n;
-    coverage={...value,matched:filters.length?db.query('SELECT count(*) AS n'+filtered).get(...args).n:value.total};
+    coverage={...value,matched:filters.length?db.query('SELECT count(*) AS n'+filtered).get(...args).n:value.total,properties:usesSize||usesDate};
     if(context.counts.size>=64)context.counts.delete(context.counts.keys().next().value!);
     context.counts.set(countKey,coverage!);
   }

@@ -53,3 +53,38 @@ To reproduce the workload, create `files(id INTEGER PRIMARY KEY,nameKey TEXT)` a
 The native window was searching for `ne`. Isolated 1,000-row reads against the same live full index exposed another bottleneck: both its preview and complete response exceeded a 10-second deadline in 0.3.6. The prefix-range candidate returned 1,000 provisional rows in 965 ms. Its complete global count still exceeded that deadline. These single observations include process launch and do not promise a subsecond exact count.
 
 The shortcut applies to a single lowercase ASCII term with no additional filters or omissions. Filename exact/stem and prefix tiers precede all non-prefix tiers, including the maximum learned boost. It uses the existing name index and ranking expression. If a complete requested page cannot be satisfied from that range, the complete query follows its normal path. Uppercase, alternative and filtered queries keep their existing behavior. Reference regressions check ordering, total counts, later pages and inclusion of non-prefix and folder-only matches.
+
+
+## Search caches and metadata updates
+
+Version 0.3.8 keeps name candidate sets and exact name counts across property-only changes, while reloading displayed properties and recalculating size/date-dependent counts. Result-cache keys use parsed query structure, backend dependencies and scope-local journal revisions. Entries are bound after synchronization to the snapshot actually read. Identical in-flight requests share a reader job; cancellation and generations remain separate for each client. Preview and exact requests remain separate. Serialized keys and bodies have a combined 16-MiB/256-entry budget, with at most 1 MiB per entry; this is not a bound on total JavaScript heap usage.
+
+Hyperfine compared the installed 0.3.7 CLI with the 0.3.8 candidate on the same frozen list of **500,000 synthetic paths**. The query was `ne sort:name`, requesting 300 rows with an exact total of 500,000. Each command starts a private service, warms the query once, then performs eight update/search pairs. Every response must match the reference paths, count, engine and next offset. One Hyperfine warmup and three measured runs were used for each binary and workload.
+
+| Eight requests plus service startup and cold warmup | 0.3.7 mean ± SD | 0.3.8 mean ± SD |
+| --- | ---: | ---: |
+| Update an unrelated journal scope before each request | 196.3 ± 14.6 ms | 127.6 ± 5.5 ms |
+| Update cached properties before each request | 456.7 ± 73.4 ms | 249.3 ± 35.0 ms |
+
+The command-level mean ratios were **1.54×** and **1.83×**. Individual warm API requests, pooled from the 24 measured update/search pairs per case, were:
+
+| Warm API workload | 0.3.7 median / p95 | 0.3.8 median / p95 |
+| --- | ---: | ---: |
+| Unrelated scope writes | 3.31 / 5.28 ms | 1.26 / 2.02 ms |
+| Property-only writes | 31.44 / 48.67 ms | 5.49 / 7.70 ms |
+
+Unrelated-scope result-cache hits changed from 0/24 to 24/24. Property updates deliberately missed the response cache in both versions so that returned properties stayed current; the candidate reused expensive name work inside its reader. Regression instrumentation also verifies that name aggregate SQL is skipped after hydration/property events, property-dependent aggregates run again, and actual additions/deletions invalidate name counts.
+
+An earlier run before the additional media cleanup fix showed smaller/noisier command-level gains: 177.5 → 176.5 ms for unrelated scopes and 424.8 → 378.1 ms for properties. Those local raw results were retained. Differences between groups include process startup, page-cache state and concurrent host activity; the stronger final run is not a universal speed factor.
+
+During installed acceptance, the existing service was spending prolonged time in SQLite and had the live and media databases open. The media subtree predicate used a full covering-index scan for each removed directory. Replacing `substr(path,1,?)=?` with `path>=? AND path<?` uses an indexed range with the same slash-prefix boundary already tested above. A new live regression removes descendants below an emoji directory while preserving prefix siblings. The observed query-plan improvement and correctness test do not establish a measured whole-app speedup for this change.
+
+The final signed installed CLI passed an additional private API trace with all eight requests served from the result cache, and the actual native-owned service reported version 0.3.8. A native window observation is a smoke check, not a timed interaction/keyboard acceptance. Existing journal gap/overlay warnings remain visible; this update does not reconcile them or prove current filesystem completeness.
+
+Reproduce the cache comparison with:
+
+```sh
+bun scripts/bench-cache.ts /path/to/fe-0.3.7 /path/to/fe-0.3.8 /path/to/evidence
+```
+
+See [the machine-readable summary](benchmarks/2026-11-13/cache-summary.json) for binary/fixture hashes and command-level results. Earlier JSON outputs are preserved when the fixture is reused. Limits: OS caches are uncontrolled; service launch and cold query are included in Hyperfine, but not in the warm API table. The corpus contains stored synthetic filenames, with no query-time directory traversal. These measurements are not a 68-million-row cold-query or native-UI benchmark. No bigram index, bitmap library or alternative backend is introduced.

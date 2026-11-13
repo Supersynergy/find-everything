@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.8 — 2026-11-13
+
+- Use the existing media path index for live subtree cleanup. Avoid a complete media-table scan for every removed directory, and match non-BMP directory prefixes without mixing JavaScript UTF-16 lengths with SQLite character lengths.
+- Retain prepared filename candidate sets, directory counts and exact name counts across metadata hydration and property-only live events. Recompute size/date-dependent counts, reload row properties and invalidate membership caches after additions, removals or path representation changes. Existing prepared snapshots remain readable; no full rebuild is required.
+- Share equivalent in-flight searches across clients with independent cancellation, generations and prefetch handling. Preserve the two-job admission limit and separate preview/exact work.
+- Bind API cache entries to the snapshot searched after synchronization. Use parsed query structure and scope-local journal clocks, preserve caller query echoes and live warnings, and avoid dependencies on unrelated search backends. Rolling date queries use minute buckets.
+- Bound cached keys and bodies together to 16 MiB/256 entries; allow individual responses up to 1 MiB. Add regression coverage for large pages, cache bounds, snapshot binding, canonical query semantics and shared cancellation.
+
 ## 0.3.7 — 2026-11-13
 
 - Produce early relevance matches for a single lowercase ASCII term from the indexed filename-prefix range. Exact/stem and prefix tiers outrank other matches even with bounded learning. Preview responses stay provisional; complete responses use the shortcut only when it covers the entire requested page, preserving all other matches through the existing path.

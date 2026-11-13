@@ -7,19 +7,19 @@ import { normalizeQuery, QUERY_HELP } from "./smart-query";
 import { listenSocket, waitForSocketOwner } from "./socket";
 import { browse } from "./browse";
 import { searchSounds, semanticPath, closeSoundWorker } from "./semantic";
-import { livePath, liveStatus } from "./delta";
+import { liveRevisionFor, liveStatus } from "./delta";
 import { startLive } from "./live";
 import {defaultIndex} from './catalog';
 import {favoritesFile} from './file-filters';
-import { searchPrepared, searchStreaming, syncSearch, searchIndexPath,prepareSearch,indexProperties } from './path-search';
-import {SearchProcess,SearchWork} from './search-process';
+import { searchPrepared, searchStreaming, syncSearch, searchIndexPath,prepareSearch,indexProperties,preparedRevision } from './path-search';
+import {SearchProcess,SearchWork,searchedCacheKey} from './search-process';
+import {SearchCache} from './search-cache';
 import {learnedSelections,learningFile} from './search-learning';
 import {learningContext} from './search-ranking';
 import {createInterface} from 'node:readline';
 import {searchContents,contentPath} from './content-search';
 
-export const VERSION = "0.3.7";
-const CACHE_TTL_MS = 300000, CACHE_MAX_ENTRIES = 256, CACHE_MAX_BYTES = 16 * 1024 * 1024;
+export const VERSION = "0.3.8";
 function learningStamp(){try{const s=fs.statSync(learningFile());return `${s.mtimeMs}:${s.size}:${Math.floor(Date.now()/3600000)}`;}catch(e){if(e.code==='ENOENT')return 'none';throw e;}}
 
 /** Adds the watcher and age envelope. It stays separate from the snapshot body so a
@@ -113,10 +113,26 @@ export function createApi(token: string, localSocket = false): http.Server & {ca
   if (token.length < 32) throw new Error("FE_API_TOKEN must contain at least 32 characters");
   let active = 0;
   let refreshing=false;
-  const reader=new SearchProcess(undefined,work=>{const parsed=parseQuery(normalizeQuery(work.query));if(!parsed.semantic&&!parsed.mediaFilters.length)syncSearch(work.index);});
+  const fingerprint = (file: string) => { try { const s = fs.statSync(file); return [s.mtimeMs, s.size, s.ino]; } catch (e) { if (e.code === 'ENOENT') return null; throw e; } };
+  const cacheContext=(work:SearchWork)=>{
+    const parsed=parseQuery(normalizeQuery(work.query)),index=work.index;
+    const regular=parsed.content===undefined&&!parsed.semantic&&!parsed.mediaFilters.length;
+    const prepared=regular?preparedRevision(index):undefined,liveRevision=liveRevisionFor(index);
+    // Parsed structure shares only equivalent queries, retaining quoted spaces,
+    // case and ordered terms. Each backend contributes its own dependencies.
+    const key=JSON.stringify([parsed,index,work.limit,work.offset,work.phase,
+      Math.floor(Date.now()/3600000),parsed.dmFilter?Math.floor(Date.now()/60000):0,
+      effectiveOptions(index),fingerprint(indexPathFor(index)),
+      regular?[fingerprint(searchIndexPath(index)),prepared]:null,
+      parsed.mediaFilters.length||parsed.semantic?fingerprint(mediaPath(index)):null,
+      parsed.content!==undefined?fingerprint(contentPath(index)):null,
+      parsed.semantic?fingerprint(semanticPath(index)):null,
+      liveRevision,fingerprint(learningFile()),parsed.favorites!==undefined?fingerprint(favoritesFile()):null]);
+    return {key,prepared,liveRevision};
+  };
+  const reader=new SearchProcess(undefined,work=>{const parsed=parseQuery(normalizeQuery(work.query));if(parsed.content===undefined&&!parsed.semantic&&!parsed.mediaFilters.length)syncSearch(work.index);},work=>cacheContext(work).key);
   reader.warm();
-  const cache = new Map<string, { at: number; data: any; bytes: number }>();
-  let cacheBytes = 0;
+  const cache = new SearchCache<Awaited<ReturnType<typeof searchRaw>>>();
   const cachedSearch = async (work:SearchWork,signal:AbortSignal) => {
     reader.advance(work);
     const {query,index,limit,offset}=work;
@@ -127,29 +143,16 @@ export function createApi(token: string, localSocket = false): http.Server & {ca
     if(work.phase&&work.phase!=='preview')throw new Error('Invalid search phase');
     const normalizedQuery=normalizeQuery(query);
     const started = performance.now();
-    const fingerprint = (file: string) => { try { const s = fs.statSync(file); return [s.mtimeMs, s.size]; } catch (e) { if (e.code === "ENOENT") return null; throw e; } };
-    // Learned selections are bucketed per hour, so the bucket belongs in the key:
-    // a hit from the previous hour must not replay the previous bucket.
-    const key = JSON.stringify([query, index, limit, offset,work.phase,Math.floor(Date.now()/3600000), effectiveOptions(index), fingerprint(indexPathFor(index)), fingerprint(searchIndexPath(index)), fingerprint(mediaPath(index)), fingerprint(contentPath(index)), fingerprint(semanticPath(index)), fingerprint(livePath()),fingerprint(learningFile()),/\b(?:favorites|fav|is|type):/i.test(normalizedQuery)?fingerprint(favoritesFile()):null]);
-    const hit = cache.get(key);
-    // The key carries the fingerprint of every source file, so a hit can never
-    // outlive a changed index; the envelope is recomputed for the current moment.
-    if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
-      cache.delete(key); cache.set(key, hit); // touch: the oldest *unused* entry is evicted
-      return { ...presentSearch(hit.data,index), elapsedMs: Math.round(performance.now() - started), cacheHit: true };
-    }
-    if (hit) { cache.delete(key); cacheBytes -= hit.bytes; }
+    const key=cacheContext(work).key,hit=cache.get(key);
+    if(hit)return {...presentSearch({...hit,query,normalizedQuery},index),elapsedMs:Math.round(performance.now()-started),cacheHit:true};
     const data = await reader.search(work,signal);
-    const bytes = Buffer.byteLength(JSON.stringify(data));
-    if (bytes <= 256 * 1024) {
-      while (cache.size && (cache.size >= CACHE_MAX_ENTRIES || cacheBytes + bytes > CACHE_MAX_BYTES)) {
-        const oldest = cache.keys().next().value; cacheBytes -= cache.get(oldest)!.bytes; cache.delete(oldest);
-      }
-      const previous = cache.get(key);
-      if (previous) cacheBytes -= previous.bytes;
-      cache.set(key, { at: Date.now(), data, bytes }); cacheBytes += bytes;
-    }
-    return { ...presentSearch(data,index), cacheHit: false };
+    const current=cacheContext(work),searched=data[searchedCacheKey];
+    const prepared=current.prepared;
+    // prepare() can apply journal changes before the worker reads. Cache under
+    // that searched key only while it still describes the returned snapshot.
+    const bound=data.engine!=='sqlite-trigram'||prepared&&prepared.live===current.liveRevision&&data.snapshotId.startsWith(`${prepared.source}:${prepared.live}:${prepared.properties}:`);
+    if(searched===current.key&&bound)cache.set(searched,data);
+    return { ...presentSearch({...data,query,normalizedQuery},index), cacheHit: false };
   };
   const server = http.createServer(async (req, res) => {
     const send = (status: number, data: unknown) => {if(res.destroyed)return; const body = JSON.stringify(data); res.writeHead(status, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body), "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" }); res.end(body); };

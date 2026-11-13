@@ -8,6 +8,15 @@ export const livePath = () => path.join(INDEX_DIR, "live.sqlite");
 // lookup is being prepared. Keep a finite, shared bound for writer and reader.
 export const LIVE_PATH_LIMIT = 1000000;
 export function baseStamp(index: string): string { const s = fs.statSync(indexPathFor(index)); return `${s.mtimeMs}:${s.size}`; }
+/** Scope-local clock; unrelated journal writes must not invalidate search bodies. */
+export function liveRevisionFor(index: string): number {
+  if (!fs.existsSync(livePath())) return 0;
+  const db = new Database(livePath(), { readonly: true });
+  try {
+    db.exec('PRAGMA busy_timeout=1000; PRAGMA cache_size=-1024;');
+    return db.query('SELECT revision FROM scopes WHERE name=? AND stamp=?').get(index, baseStamp(index))?.revision ?? 0;
+  } finally { db.close(); }
+}
 export function openLive(): Database {
   const db = new Database(livePath(), { create: true });
   db.exec(`PRAGMA busy_timeout=1000; PRAGMA cache_size=-4096;

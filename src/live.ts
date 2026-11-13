@@ -181,7 +181,8 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
               if (fs.existsSync(mediaPath(scope.name))) {
                 if (c.tree && !c.present) {
                   const media = new Database(mediaPath(scope.name),{readonly:true});
-                  try { for (const r of media.query("SELECT path FROM files WHERE substr(path,1,?)=?").all(p.length+1,p+"/")) db.query("INSERT OR IGNORE INTO jobs(scope,path) VALUES (?,?)").run(scope.name,r.path); } finally { media.close(); }
+                  const prefix=p.replace(/\/$/,'')+'/';
+                  try { for (const r of media.query("SELECT path FROM files WHERE path>=? AND path<?").all(prefix,prefix.slice(0,-1)+'0')) db.query("INSERT OR IGNORE INTO jobs(scope,path) VALUES (?,?)").run(scope.name,r.path); } finally { media.close(); }
                 }
                 if (/\.(mp3|wav|aac|flac|m4a|ogg|opus|aiff?|caf|wma|mp4|m4v|mov|mkv|png|jpe?g|webp)$/i.test(p)) db.query("INSERT INTO jobs(scope,path) VALUES (?,?) ON CONFLICT(scope,path) DO UPDATE SET failures=0,retryAt=0").run(scope.name,p);
               }

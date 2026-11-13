@@ -1,4 +1,6 @@
-# Find Everything 0.3.7 · Apple Silicon preview
+# Find Everything 0.3.8 · Apple Silicon preview
+
+Reuse filename candidate sets and exact name counts across metadata hydration and property-only live events. Refresh displayed properties and property-dependent counts, and invalidate membership caches after additions or removals. Equivalent running searches share one reader job with separate cancellation for each client. API caches use scope-local clocks and the snapshot searched after synchronization, preserve current warnings and query echoes, and remain bounded by bytes. Existing prepared indexes work without rebuilding. See the [cache benchmark](../BENCHMARKS-2026-11-13.md) for measurements and limits. First-time broad searches and full counts can still be slow; this update does not introduce a bigram index or change hidden/generated-file settings.
 
 Short single-term relevance searches can show filename-prefix matches before a global scan and sort. Those matches outrank non-prefix matches under the existing relevance rules. A complete response uses that range only when it covers the full requested page; previews remain provisional and the complete query retains other filename and folder matches. Automatic live polling waits for the pending exact response. If its count times out, the preliminary rows remain usable and the count failure is shown. Broad exact counts can still be slow.
 
