@@ -33,14 +33,19 @@ try{
   const result={method,split,coldMs,modelSetupMs:first.runtime?.setupMs,modelPid:first.runtime?.pid,selectionHash:split==='heldout'?hash(selectionFile):null,implementationHash:baseline?hash(root+'/baseline-instantfind.ts'):implementation(),casesHash:hash(casesFile),corpusHash:hash(root+'/corpus.json'),summary:{all:summary(rows),de:summary(rows.filter(r=>r.language==='de')),en:summary(rows.filter(r=>r.language==='en')),...Object.fromEntries(['pdf','office','text'].map(k=>[k,summary(rows.filter(r=>r.kind===k))]))},parentPeakMiB:parentPeak,workerPeakMiB:workerPeak,totalPeakUpperMiB:parentPeak+workerPeak,rows};
   fs.writeFileSync(output,JSON.stringify(result,null,2));console.log(JSON.stringify({...result,rows:undefined}));
  }else if(phase==='verify-final'){
-  const previous=JSON.parse(fs.readFileSync(root+'/final-baseline-heldout.json','utf8')),current=JSON.parse(fs.readFileSync(root+'/final-passages-heldout.json','utf8'));
+  const previous=JSON.parse(fs.readFileSync(root+'/final-baseline-heldout.json','utf8')),current=JSON.parse(fs.readFileSync(root+'/integration-passages-regression.json','utf8')),blind=JSON.parse(fs.readFileSync(root+'/final-passages-heldout.json','utf8'));
   if(current.implementationHash!==implementation()||previous.implementationHash!==hash(root+'/baseline-instantfind.ts'))throw new Error('Evaluation code changed');
   for(const result of [previous,current])if(result.casesHash!==hash(root+'/cases-passages-frozen.json')||result.corpusHash!==hash(root+'/corpus.json'))throw new Error('Evaluation inputs changed');
   const a=previous.summary.all,b=current.summary.all;
   if(a.n!==40||b.n!==40||b.top1-a.top1<4||b.top20<a.top20||current.totalPeakUpperMiB>previous.totalPeakUpperMiB)throw new Error('Quality or RAM acceptance failed');
-  if(current.selectionHash!==hash(root+'/selection-passages-frozen.json')||previous.selectionHash!==current.selectionHash)throw new Error('Frozen selection changed');
+  if(blind.selectionHash!==hash(root+'/selection-passages-frozen.json')||previous.selectionHash!==blind.selectionHash)throw new Error('Frozen selection changed');
+  const originalChecks=JSON.parse(fs.readFileSync(root+'/checks-preintegration.json','utf8'));if(blind.implementationHash!==originalChecks.hash||current.summary.all.top1<blind.summary.all.top1)throw new Error('Blind-test evidence or integration regressed');
   const checks=JSON.parse(fs.readFileSync(root+'/checks.json','utf8'));if(checks.hash!==implementation()||checks.result!=='pass')throw new Error('Code checks missing');
-  const regression=JSON.parse(fs.readFileSync(root+'/final-known-passages-regression.json','utf8'));if(regression.implementationHash!==implementation()||regression.summary.all.top1<57||regression.summary.all.top20!==60)throw new Error('Known regression failed');
+  const regression=JSON.parse(fs.readFileSync(root+'/integration-known-passages-regression.json','utf8'));if(regression.implementationHash!==implementation()||regression.summary.all.top1<57||regression.summary.all.top20!==60)throw new Error('Known regression failed');
+  const installed='/Users/master/Applications/Find Everything.app/Contents';
+  if(hash(installed+'/Helpers/fe')!==hash(path.resolve('app/Find Everything.app/Contents/Helpers/fe')))throw new Error('Installed app was replaced');
+  for(const name of ['worker.py','compact_model.py','compact_tokenizer.py'])if(hash(installed+'/Resources/instantfind/'+name)!==hash(path.resolve('runtime/instantfind/'+name)))throw new Error('Installed runtime differs');
+  const smoke=JSON.parse(fs.readFileSync(root+'/installed-smoke.json','utf8'));if(!smoke.health.ok||smoke.results.length!==2||smoke.results[0].runtime.pid!==smoke.results[1].runtime.pid)throw new Error('Installed service acceptance missing');
   console.log(JSON.stringify({passed:true,top1Gain:b.top1-a.top1,top20:b.top20,previousPeakMiB:previous.totalPeakUpperMiB,currentPeakMiB:current.totalPeakUpperMiB}));
  }else throw new Error('Use extract|index|evaluate|verify');
 }finally{instantEncoder.close();}
