@@ -15,6 +15,7 @@ import { indexSounds, closeSoundWorker } from "./semantic";
 import { runtimeDir, semanticStatus } from "./semantic-worker";
 import { startLive } from "./live";
 import { serveLiveWorker } from './live-process';
+import {compactIndex,compactionStatus,reconcileIndex} from './compaction';
 import { prepareSearch, indexProperties, searchIndexStatus } from './path-search';
 import {combineIndexes} from './combine';
 import {changeFavorites} from './file-filters';
@@ -39,7 +40,7 @@ interface Flags {
   scope?: string; paths: string[]; name?: string; preset?: string; opts: EngineOpts;
   limit: number; json: boolean; nul: boolean; tui: boolean; fresh: boolean; progress: boolean;
   replace: boolean; names: boolean; port: number; interval: number; help: boolean; version: boolean;
-  model?:string;python?:string;
+  model?:string;python?:string;ocr?:boolean;ocrPages?:number;
   socket?: string; snapshot: boolean; maxFiles: number; seconds: number; kind: string; idleSeconds: number; offset: number; parentBound: boolean; query: string; live?: boolean; liveIndexes: string[]; rows:number;sources:string[];
 }
 function numeric(value: string, name: string, min: number, max: number): number {
@@ -74,6 +75,8 @@ function parseFlags(argv: string[]): { pos: string[]; flags: Flags } {
         break;
       }
       case "--json": flags.json = true; break;
+      case '--ocr': flags.ocr=true;break;
+      case '--ocr-pages': flags.ocrPages=numeric(value(),a,1,100);if(!Number.isInteger(flags.ocrPages))throw new Error('OCR page limit must be an integer');break;
       case "--model": flags.model=value();break;
       case "--python": flags.python=value();break;
       case "--progress-json": flags.progress = true; break;
@@ -172,9 +175,11 @@ Examples:
   fe search 'meaning:"recover a failed release" ext:md' --index NAME
 
 Path indexes store names and paths; fe content index explicitly prepares local document full-text search.
-  fe content index|status|clear --index NAME [--max-files 500 --seconds 60] [--json]
+  fe content index|status|clear --index NAME [--ocr --ocr-pages 32] [--max-files 500 --seconds 60] [--json]
+  fe compact [status] --index NAME --rows 1000000 --seconds 30   resume saved-change merge
+  fe reconcile --index NAME                                 explicitly scan configured roots
   fe search 'content:"quarterly revenue" ext:pdf' --index NAME --json
-Text/code, extractable PDFs and macOS Office/RTF are supported within reported limits. No OCR.
+Text/code, extractable PDFs and macOS Office/RTF are supported within reported limits. Local OCR is explicit with --ocr.
 `;
 
 function selection(flags: Flags): { scope: string; opts: EngineOpts } {
@@ -312,6 +317,8 @@ async function main(): Promise<void> {
       console.log(JSON.stringify(result)); return;
     }
     case "search": return cmdSearch(rest.join(" "), flags);
+    case 'compact':{const {scope}=selection(flags);console.log(JSON.stringify(rest[0]==='status'?compactionStatus(scope):await compactIndex(scope,flags.seconds,flags.rows)));return;}
+    case 'reconcile':{const {scope}=selection(flags);console.log(JSON.stringify(await reconcileIndex(scope)));return;}
     case 'combine': {if(!flags.name)throw new Error('Use fe combine --name everything');console.log(JSON.stringify(await combineIndexes(flags.name,flags.sources,flags.replace,flags.seconds)));return;}
     case 'prepare': case 'properties': {
       const {scope}=selection(flags);if(!fs.existsSync(indexPathFor(scope)))throw new Error('No existing path snapshot; run fe index explicitly first');
@@ -339,7 +346,7 @@ async function main(): Promise<void> {
       const {scope}=selection(flags);
       const action=rest[0]??'status';
       if(rest.length>1||!['index','status','clear'].includes(action))throw new Error('Use fe content index|status|clear --index NAME');
-      const result=action==='index'?await indexContents(scope,flags.maxFiles,flags.seconds):action==='clear'?await clearContents(scope):contentStatus(scope);
+      const result=action==='index'?await indexContents(scope,flags.maxFiles,flags.seconds,undefined,{ocr:flags.ocr,maxPages:flags.ocrPages}):action==='clear'?await clearContents(scope):contentStatus(scope);
       console.log(JSON.stringify(result));return;
     }
     case "query-help": return void console.log(flags.json ? JSON.stringify(QUERY_HELP) : QUERY_HELP.examples.join("\n") + "\n\n" + QUERY_HELP.notes);

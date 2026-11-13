@@ -26,7 +26,7 @@ den gepinnten Export per SHA-256 und kopiert ihn in den privaten App-Support-Ord
 Die Modellgewichte unterliegen der Gemma-Lizenz und sind nicht im App-Bundle enthalten.
 
 Die Textvorbereitung verwendet den bestehenden begrenzten Extraktor. Unterstützt
-werden Text-/Projektdateien, extrahierbare PDFs und unter macOS Office/RTF. Kein OCR.
+werden Text-/Projektdateien, PDFs und unter macOS Office/RTF. Mit `fe content index --ocr` werden auch gescannte PDFs und Bilder lokal erkannt; danach den Bedeutungsindex ausdrücklich aktualisieren.
 Ein Budgetende liefert `pending:true`; derselbe Befehl setzt den Aufbau fort.
 Ein vollständiger alter Vektorindex bleibt bis zum fertigen Austausch erhalten.
 

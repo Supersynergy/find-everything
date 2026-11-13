@@ -2,12 +2,13 @@ import { Database } from "bun:sqlite";
 import * as fs from "fs";
 import * as path from "path";
 import { INDEX_DIR, indexPathFor } from "./engine";
+import {recoverPublishedCompaction} from './compaction-recovery';
 
 export const livePath = () => path.join(INDEX_DIR, "live.sqlite");
 // A full-disk snapshot can accumulate more than 100k changed paths while its
 // lookup is being prepared. Keep a finite, shared bound for writer and reader.
 export const LIVE_PATH_LIMIT = 1000000;
-export function baseStamp(index: string): string { const s = fs.statSync(indexPathFor(index)); return `${s.mtimeMs}:${s.size}`; }
+export function baseStamp(index: string): string { const file=indexPathFor(index);recoverPublishedCompaction(file);const s = fs.statSync(file); return `${s.mtimeMs}:${s.size}`; }
 /** Scope-local clock; unrelated journal writes must not invalidate search bodies. */
 export function liveRevisionFor(index: string): number {
   if (!fs.existsSync(livePath())) return 0;

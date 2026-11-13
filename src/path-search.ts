@@ -8,6 +8,7 @@ import { baseStamp, deltaFor, livePath, LIVE_PATH_LIMIT } from './delta';
 import {omissionRules,omitted,NOISE_NAMES,NOISE_SUFFIXES} from './file-filters';
 import {relevanceOrder,relevanceScore} from './search-ranking';
 import {preparedFileStamp} from './search-cache';
+import {countCacheKey,readExactCounts,writeExactCounts} from './count-cache';
 
 export const searchIndexPath = (index:string) => path.join(INDEX_DIR,`search-${validateName(index)}.sqlite`);
 const VERSION='3';
@@ -441,11 +442,16 @@ export function searchPrepared(index:string,pq:ParsedQuery,limit:number,offset:n
   const filtered=from+(filters.length?' AND '+filters.join(' AND '):'');
   const countKey=JSON.stringify([plan.sql,plan.args,known,pq.sizeFilter,pq.dmFilter,timeBucket]);
   let coverage=context.counts.get(countKey);
+  // Small scopes count cheaply; avoid disk writes on their interactive path.
+  const durableKey=context.rows>=100000?countCacheKey([s.dev,context.inode,s.mtimeMs,s.size,source,liveRevision,propertiesRevision],
+    [pq.fuzzy,pq.constraints,pq.omit,pq.favorites,pq.sizeFilter,pq.dmFilter,usesSize,usesDate,timeBucket]):undefined;
+  if(!coverage&&!preview&&durableKey){coverage=readExactCounts(index,durableKey);if(coverage){if(context.counts.size>=64)context.counts.delete(context.counts.keys().next().value!);context.counts.set(countKey,coverage);}}
   if(!coverage&&!preview){
     const value={total:total(),known:0};
     const knownFrom=value.total>10000?countFrom.replace(' FROM files f',` FROM files f INDEXED BY ${usesSize?'file_size':'file_modified'}`):countFrom;
     value.known=known==='1'?value.total:db.query(`SELECT count(*) AS n${knownFrom} AND ${known}`).get(...plan.args).n;
     coverage={...value,matched:filters.length?db.query('SELECT count(*) AS n'+filtered).get(...args).n:value.total,properties:usesSize||usesDate};
+    if(durableKey)writeExactCounts(index,durableKey,coverage);
     if(context.counts.size>=64)context.counts.delete(context.counts.keys().next().value!);
     context.counts.set(countKey,coverage!);
   }

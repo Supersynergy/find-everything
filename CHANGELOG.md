@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.40 — 2026-11-13
+
+- Add resumable compaction from a pinned prepared snapshot, preserving changes after its journal watermark, CR/LF paths, coverage warnings and previous files. Recover interrupted publication before using the snapshot. Keep real journal gaps until explicit reconciliation.
+- Persist up to 128 exact count results for scopes with at least 100,000 paths in a bounded private SQLite cache. Bind entries to physical and logical snapshot identity; first-time counts still run the exhaustive query. Reuse them across reader/process restarts without changing ordering or filters.
+- Add explicit local Vision OCR for scanned PDFs and images, page/method/confidence provenance, per-file page limits, changed-file validation and a native Settings action. Keep OCR out of the search path and retain existing Instantfind support.
+
 ## 0.3.9 — 2026-11-13
 
 - Move live event handling and metadata work into one owned worker process so those batches do not run on the API event loop. Reuse the existing process-group guardian to stop the worker and its helpers when the owning service exits.

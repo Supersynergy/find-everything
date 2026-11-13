@@ -7,6 +7,7 @@ import {indexStatus,indexPathFor,INDEX_DIR,snapshotDescription} from './engine';
 import {acquireLock,canonicalPaths,profiles,saveProfile,validateName,BUILTIN_SCOPES} from './catalog';
 import {mediaPath} from './media';
 import {semanticPath} from './semantic';
+import {recoverPublishedCompaction} from './compaction-recovery';
 
 function cloneSnapshot(source:string,destination:string) {
   const db=new Database(source,{readonly:true});
@@ -51,6 +52,7 @@ export async function combineIndexes(name:string,sourceNames:string[]=[],replace
   sources.sort((a,b)=>sizes.get(b.name)!-sizes.get(a.name)!);
   const profile={name,paths:canonicalPaths(sources.flatMap(s=>s.paths)),includeHidden:true,includeIgnored:true,indexMaxAgeMinutes:'60'};
   const file=indexPathFor(name),lookup=searchIndexPath(name),stage=lookup+'.combine',flat=file+'.combine',metadata=path.join(INDEX_DIR,`index-${name}.json`);
+  recoverPublishedCompaction(file);
   const release=acquireLock(file+'.lock');let db:Database|undefined,output:fs.WriteStream|undefined,publishRelease:(()=>void)|undefined;
   const modified=(file:string)=>fs.existsSync(file)?fs.statSync(file).mtimeMs:null;
   try {

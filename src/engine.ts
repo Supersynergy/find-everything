@@ -10,6 +10,7 @@ import { once } from "events";
 import { acquireLock, BUILTIN_SCOPES, IndexOptions, profile, profiles, validateName } from "./catalog";
 import { MEDIA_FIELDS, NumericFilter, normalizeQuery, numericFilters } from "./smart-query";
 import { deltaFor } from "./delta";
+import {recoverPublishedCompaction} from './compaction-recovery';
 
 export const HOME = os.homedir();
 export const IS_MAC = process.platform === "darwin";
@@ -263,6 +264,7 @@ export async function shardIndex(file: string, dir: string): Promise<void> {
 export function rebuildIndex(scope: Scope, opts: EngineOpts, monitor?: { progress: (stats: { count: number; bytes: number }) => void; signal: AbortSignal; externalTimeout: boolean }): Promise<void> {
   opts = effectiveOptions(scope, opts);
   const file = indexPathFor(scope);
+  recoverPublishedCompaction(file);
   const pending = inFlight.get(file);
   if (pending) return pending;
 

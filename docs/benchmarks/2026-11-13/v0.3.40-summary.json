@@ -1,0 +1,155 @@
+{
+  "version": "0.3.40",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "bun": "1.4.4",
+  "countBenchmark": {
+    "rows": 1000000,
+    "requestsPerCommand": 6,
+    "baselineSha256": "c1b88ba0fab83a1580c5cd2fa8f61ab0854a467d5abed154f1b5f69d711a2302",
+    "candidateSha256": "cd4b89dd8f0a57d16ae1de4fd89435a66ad033eba48a4ae5eb6f21e6a43ed8bb",
+    "fixtureSha256": "b99c2254825e9bfd1dea80240523b7f281fb594bff02aaf1dc76cf01f1c56d5a",
+    "variants": [
+      {
+        "version": "0.3.9",
+        "wall": {
+          "unit": "second",
+          "count": 3,
+          "mean": 1.0042635833333333,
+          "stddev": 0.046433849704486954,
+          "median": 0.989060416,
+          "min": 0.9673370840000001,
+          "max": 1.05639325
+        },
+        "cpu": {
+          "unit": "second",
+          "count": 3,
+          "mean": 0.8293516666666667,
+          "stddev": 0.0031225672664224992,
+          "median": 0.830542,
+          "min": 0.825809,
+          "max": 0.831704
+        }
+      },
+      {
+        "version": "0.3.40",
+        "wall": {
+          "unit": "second",
+          "count": 3,
+          "mean": 0.5913997083333333,
+          "stddev": 0.03443465880929735,
+          "median": 0.589442,
+          "min": 0.5579856670000001,
+          "max": 0.626771458
+        },
+        "cpu": {
+          "unit": "second",
+          "count": 3,
+          "mean": 0.45072399999999996,
+          "stddev": 0.0045482382303481065,
+          "median": 0.451353,
+          "min": 0.44589399999999996,
+          "max": 0.45492499999999997
+        }
+      }
+    ],
+    "limits": [
+      "One million synthetic saved paths; six fresh CLI processes per command",
+      "One warmup and three measured commands per version",
+      "OS caches and concurrent host load uncontrolled",
+      "Exact-result hashes match; this is count reuse, not a first-time-query or UI speed claim"
+    ]
+  },
+  "compaction": {
+    "passed": true,
+    "rows": 1000000,
+    "identicalPathFile": true,
+    "calls": [
+      {
+        "ms": 774.3097500000003,
+        "rows": 250000,
+        "resumable": true
+      },
+      {
+        "ms": 784.1886670000004,
+        "rows": 500000,
+        "resumable": true
+      },
+      {
+        "ms": 531.434874999999,
+        "rows": 750000,
+        "resumable": true
+      },
+      {
+        "ms": 619.0032499999998,
+        "rows": 1000000,
+        "resumable": true
+      },
+      {
+        "ms": 81.29216699999961,
+        "rows": 1000000,
+        "resumable": false
+      }
+    ],
+    "totalMs": 2790.228708999999,
+    "limits": [
+      "Pinned synthetic snapshot; no new filesystem scan",
+      "Includes CLI startup, checkpoint writes and publication"
+    ]
+  },
+  "ocr": {
+    "passed": true,
+    "beforeIndexed": 0,
+    "afterIndexed": 2,
+    "beforeMs": 150.43558299999995,
+    "afterMs": 1522.6442080000002,
+    "matched": 2,
+    "recognizedPages": 3,
+    "files": {
+      "scan.png": "f8bccfa01ad51871a30e405dd7e55533b4d66239f8763802f5719c86a1a2da2d",
+      "scan.pdf": "9ba79ae7676c0a8e4b1307698f91578d0da8df9ea21ed1b421532e20fc938b1a"
+    },
+    "methods": [
+      {
+        "file": "scan.png",
+        "method": "vision-ocr",
+        "pages": [
+          {
+            "page": 1,
+            "confidence": 1,
+            "method": "ocr"
+          }
+        ]
+      },
+      {
+        "file": "scan.pdf",
+        "method": "vision-ocr",
+        "pages": [
+          {
+            "page": 1,
+            "method": "ocr",
+            "confidence": 1
+          },
+          {
+            "page": 2,
+            "method": "ocr",
+            "confidence": 1
+          }
+        ]
+      }
+    ],
+    "limits": [
+      "Two synthetic raster files, three pages; not a general OCR accuracy benchmark",
+      "Explicit indexing only; no document-body reads at search time"
+    ]
+  },
+  "checks": {
+    "typescriptTestFiles": 32,
+    "nativeHarness": true
+  },
+  "limits": [
+    "No 69-million-row reconciliation or full-disk OCR performed for release acceptance",
+    "No Spotlight/Raycast head-to-head or timed native UI comparison",
+    "Recorded historical journal gaps remain until explicit reconciliation"
+  ]
+}

@@ -24,6 +24,19 @@ import Foundation
     for _ in 0..<4000 { await Task.yield(); if !model.indexing { break } }
     model.testCancelSearch()
     precondition(calls.count == 3 && calls[2][1] == "clear" && !model.indexing)
+    model.prepareContents(ocr:true)
+    for _ in 0..<4000 { await Task.yield(); if !model.indexing { break } }
+    model.testCancelSearch()
+    precondition(calls.last!.contains("--ocr") && calls.last!.contains("--ocr-pages"))
+    calls.removeAll()
+    model.testRunTool = { args in
+      calls.append(args);precondition(args.first == "compact")
+      return calls.count == 1 ? "{\"rows\":1,\"resumable\":true}" : "{\"rows\":2,\"resumable\":false}"
+    }
+    model.compactSavedIndex()
+    for _ in 0..<4000 { await Task.yield(); if !model.indexing { break } }
+    model.testCancelSearch()
+    precondition(calls.count == 2 && !model.indexing)
     let retained = SearchQueryOptions.replacingText("name:notes", in: "content:\"quarterly revenue\" old")
     precondition(retained.contains("content:\"quarterly revenue\"") && !retained.contains(" old"))
     model.testRunTool = { _ in throw NSError(domain: "fixture", code: 1, userInfo: [NSLocalizedDescriptionKey: "Fixture extraction failed"]) }

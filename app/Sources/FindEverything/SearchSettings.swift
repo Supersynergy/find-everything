@@ -128,14 +128,17 @@ struct SearchOptionsView: View {
       Text(m.indexSummaries[m.scope.rawValue] ?? "No index summary").font(.caption).foregroundStyle(palette.muted).textSelection(.enabled)
       HStack {Button("Prepare fast search") {m.showOptions=false;m.prepareLookup()};Button("Cache file size and date") {m.showOptions=false;m.prepareLookup(properties:true)}}.disabled(m.indexing)
       Button("Combine saved indexes") {m.showOptions=false;m.combineLookups()}.disabled(m.indexing)
+      Button("Merge saved changes (resume)") {m.showOptions=false;m.compactSavedIndex()}.disabled(m.indexing)
+      Text("Combines the saved index and recorded changes. Lost journal history requires an explicit rebuild below.").font(.caption).foregroundStyle(palette.muted)
       Divider()
       Text("Document contents").fontWeight(.semibold)
       Text("content:\"quarterly revenue\" ext:pdf").font(.system(size:12,design:.monospaced)).textSelection(.enabled)
       HStack {
         Button("Index document contents") {m.showOptions=false;m.prepareContents()}
+        Button("Index with local OCR") {m.showOptions=false;m.prepareContents(ocr:true)}
         Button("Clear cached document text") {m.showOptions=false;m.prepareContents(clear:true)}
       }.disabled(m.indexing)
-      Text("Explicit and local: reads only paths in the selected index. Text/code, PDF and macOS Office/RTF; no OCR. Cached text is private but not encrypted. Searches do not read document bodies; run again after edits. Unsupported, oversized and unreadable files stay unknown. Clearing never deletes original files.").font(.caption).foregroundStyle(palette.muted)
+      Text("Explicit and local: reads only paths in the selected index. OCR reads scanned PDFs and images, up to 32 pages per file; recognized text can contain errors. Cached text is private but not encrypted. Searches do not read document bodies; run again after edits. Unsupported, oversized and unreadable files stay unknown. Clearing never deletes original files.").font(.caption).foregroundStyle(palette.muted)
       Divider()
       Text("Preparation reuses saved paths without traversing folders. Property indexing checks those paths once and resumes saved progress. Searches reuse the cache.").font(.caption).foregroundStyle(palette.muted)
       HStack { Button("Add folder or project…") {m.showOptions=false;m.indexFolder()};Button("Rebuild current index") {m.showOptions=false;m.rebuild()}.disabled(m.indexing) }
