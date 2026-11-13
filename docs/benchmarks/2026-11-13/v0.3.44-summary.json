@@ -1,0 +1,28 @@
+{
+  "version": "0.3.44",
+  "baselineObservation": {
+    "version": "0.3.43",
+    "timeoutSeconds": 20,
+    "completed": false
+  },
+  "current": {
+    "runs": 3,
+    "warmup": 1,
+    "wall": {
+      "unit": "second",
+      "count": 3,
+      "mean": 0.029350027666666667,
+      "stddev": 0.0003095952102105805,
+      "median": 0.029523833000000003,
+      "min": 0.028992583000000002,
+      "max": 0.029533667000000003
+    },
+    "installedMs": 29.964125000000195,
+    "rows": 68903781
+  },
+  "limits": [
+    "Baseline timeout was a separate observation, not a paired benchmark",
+    "Property count deliberately omitted and marked unknown",
+    "No filesystem rescan or indexed-path change"
+  ]
+}

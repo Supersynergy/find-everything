@@ -163,10 +163,11 @@ async function prepareSnapshot(index:string,seconds:number,maxRows:number) {
   } finally {try{db?.close();}finally{release();}}
 }
 
-export function searchIndexStatus(index:string) {
+export function searchIndexStatus(index:string,countProperties=true) {
   const db=openReady(index);if(!db)return {index,ready:false};
   return {index,ready:true,rows:connections.get(index)!.rows,
-    propertiesKnown:db.query('SELECT count(*) AS n FROM files WHERE size IS NOT NULL AND mtime IS NOT NULL').get().n,
+    propertiesKnown:countProperties?db.query('SELECT count(*) AS n FROM files WHERE size IS NOT NULL AND mtime IS NOT NULL').get().n:null,
+    propertiesCountExact:countProperties,
     bytes:fs.statSync(searchIndexPath(index)).size,liveRevision:Number(getMeta(db,'liveRevision')),propertiesRevision:Number(getMeta(db,'propertiesRevision'))};
 }
 

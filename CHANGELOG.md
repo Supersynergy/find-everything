@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.44 — 2026-11-13
+
+- Keep `fe explain` metadata-only by skipping the full property-count scan. Report the count as unknown with an explicit exactness flag; retain exact status counting for existing callers.
+
 ## 0.3.43 — 2026-11-13
 
 - Reuse bounded passage embeddings within the resident model worker, retaining exact ranking, filters and source-version checks. Invalidate query and passage caches when the configured model/runtime identity changes or the worker closes.

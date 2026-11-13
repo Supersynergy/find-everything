@@ -1,11 +1,7 @@
-# Find Everything 0.3.43 · Apple Silicon preview
+# Find Everything 0.3.44 · Apple Silicon preview
 
-Meaning search now reuses passage vectors in its resident model worker. Moving to another results page can reuse the same passages without running their inference again. Ranking and source-version checks still run on each search. Query vectors also belong to the current worker: changing model files, configuration or worker code discards cached values. Closing the worker clears them.
+`fe explain` now reads saved metadata without counting property rows across the entire index. On the installed 69-million-path snapshot, the previous command exceeded a 20-second diagnostic timeout. The metadata-only command returns the property count as `null` with `propertiesCountExact:false`. The installed command completed in 30 ms; three Hyperfine runs averaged 29.4 ms. [Measurements](../benchmarks/2026-11-13/v0.3.44-summary.json). Exact property counts remain available to existing status callers. Search matching and indexed paths are unchanged.
 
-The passage cache holds at most 512 vectors and 2 MiB of accounted payload. Query vectors have a separate 128-entry / 1-MiB bound. Keys are hashes. No document text or new persistent cache is written. A new process still has a cold start, and new passages still require inference.
+The previous release's bounded passage cache remains enabled. Existing scanner and journal gaps remain visible. At inspection the volume had only about 10 GiB free; the global path file occupies about 10 GB and its lookup about 28 GB. A full replacement needs more disk headroom. No original index files were removed.
 
-In a paired replay of 40 known questions over the same prepared document corpus, all 80 result pages retained identical paths, order, scores and snippets. Median next-page time fell from 382 to 65 ms; first-page time remained near 400 ms. Hyperfine measured 7.70 versus 3.91 seconds for eight two-page searches including process/model startup. These are worker-pipeline measurements, not native UI timings or another blind retrieval evaluation. See [method and limits](../PASSAGE-CACHE-0.3.43.md).
-
-The existing large-index coverage warnings remain visible. This release does not rebuild the full filesystem index. Limited disk headroom requires separate maintenance planning. Local OCR and the existing filename controls remain supported.
-
-Apple Silicon, macOS 15+. This preview is locally signed and not notarized. Intel and manual VoiceOver acceptance remain unverified.
+This Apple Silicon preview requires macOS 15+. It is locally signed and not notarized. Intel and manual VoiceOver acceptance remain unverified.
