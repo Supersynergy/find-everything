@@ -47,3 +47,9 @@ Hyperfine also measured only the affected count on a stable synthetic SQLite tab
 The counter-only mean ratio was 16.3×, including process startup. The full count returns 125,000; the bounded probe returns 1,001, which is sufficient to decide that offset 1,000 lies inside the bucket. This does not substitute a partial count for the displayed total.
 
 To reproduce the workload, create `files(id INTEGER PRIMARY KEY,nameKey TEXT)` and generate rows 1–500,000 with a seven-digit numeric basename, assigning `.txt` when `id % 4 = 0` and `.json` otherwise. Compare `SELECT count(*) FROM files f INDEXED BY file_names WHERE <relevance-expression>=0` with `SELECT count(*) FROM (SELECT 1 FROM files f INDEXED BY file_names WHERE <relevance-expression>=0 LIMIT 1001)` using Hyperfine `--warmup 1 --runs 3`. No personal paths or file contents are required.
+
+## Short relevance previews
+
+The native window was searching for `ne`. Isolated 1,000-row reads against the same live full index exposed another bottleneck: both its preview and complete response exceeded a 10-second deadline in 0.3.6. The prefix-range candidate returned 1,000 provisional rows in 965 ms. Its complete global count still exceeded that deadline. These single observations include process launch and do not promise a subsecond exact count.
+
+The shortcut applies to a single lowercase ASCII term with no additional filters or omissions. Filename exact/stem and prefix tiers precede all non-prefix tiers, including the maximum learned boost. It uses the existing name index and ranking expression. If a complete requested page cannot be satisfied from that range, the complete query follows its normal path. Uppercase, alternative and filtered queries keep their existing behavior. Reference regressions check ordering, total counts, later pages and inclusion of non-prefix and folder-only matches.

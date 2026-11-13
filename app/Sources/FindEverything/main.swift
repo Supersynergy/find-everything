@@ -693,7 +693,7 @@ final class Model: ObservableObject {
           publishReply(reply,query:t,start:start,reset:true)
           publishedPreview=true;resultIsProvisional=true
           selectedRows=resultCount>0 ? IndexSet(integer:0) : IndexSet();selectionAnchor=0;selected=0;keyboardSelection += 1
-          lastMs=Int(-t0.timeIntervalSinceNow*1000);searching=false
+          lastMs=Int(-t0.timeIntervalSinceNow*1000);searching=false;refreshing=true
           flushQuickAction()
           guard generation==searchGeneration else {return}
           try await Task.sleep(nanoseconds:80_000_000)
@@ -714,7 +714,8 @@ final class Model: ObservableObject {
       } catch {
         guard !Task.isCancelled, generation == searchGeneration else { return }
         pendingEnd=false;pendingEndAction=nil
-        if preserveSelection {liveNote="Background refresh failed: \(error.localizedDescription)"}
+        if publishedPreview {searchNote += " Exact count unavailable: \(error.localizedDescription)"}
+        else if preserveSelection {liveNote="Background refresh failed: \(error.localizedDescription)"}
         else {errorMessage=error.localizedDescription}
       }
       if publishedPreview,resultIsProvisional,selectedRows.count>1 {deferSelectionRefresh();return}
@@ -824,7 +825,7 @@ final class Model: ObservableObject {
     let index = scope.rawValue, generation = searchGeneration
     do {
       let update = try await SearchSocket.updates(index: index)
-      guard index == scope.rawValue, generation == searchGeneration, !searching, !indexing else { return }
+      guard index == scope.rawValue, generation == searchGeneration, !searching, !refreshing, !indexing else { return }
       if liveProblem != update.problem {liveProblem=update.problem}
       let note=update.watching ? (update.pending ?? 0 > 0 ? "Updating changed file properties…" : "Automatic updates active") : "Automatic updates unavailable; reopen the app to retry"
       if liveNote != note {liveNote=note}

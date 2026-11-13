@@ -1,4 +1,6 @@
-# Find Everything 0.3.6 · Apple Silicon preview
+# Find Everything 0.3.7 · Apple Silicon preview
+
+Short single-term relevance searches can show filename-prefix matches before a global scan and sort. Those matches outrank non-prefix matches under the existing relevance rules. A complete response uses that range only when it covers the full requested page; previews remain provisional and the complete query retains other filename and folder matches. Automatic live polling waits for the pending exact response. If its count times out, the preliminary rows remain usable and the count failure is shown. Broad exact counts can still be slow.
 
 Automatic loading of page two no longer counts every file in a relevance tier. A bounded offset probe preserves ordering and exact overall counts, caching only proven exact bucket sizes. No index rebuild or changed display filters are required. See the [latency measurements](../BENCHMARKS-2026-11-13.md#relevance-page-offsets) for the full-index observation and isolated Hyperfine result.
 

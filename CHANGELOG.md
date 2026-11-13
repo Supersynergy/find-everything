@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.7 — 2026-11-13
+
+- Produce early relevance matches for a single lowercase ASCII term from the indexed filename-prefix range. Exact/stem and prefix tiers outrank other matches even with bounded learning. Preview responses stay provisional; complete responses use the shortcut only when it covers the entire requested page, preserving all other matches through the existing path.
+- Keep an exact request in flight after publishing its preview, so automatic live polling does not cancel it. Preserve usable preliminary rows if the exact count times out and report that count failure in the search note.
+- Compare prefix previews and complete pages against independent relevance ordering, including non-prefix, folder-only, uppercase and alternative terms. On the live full index, the `ne` preview changed from a 10-second abort to a 965-ms, 1,000-row provisional response. Its complete global count still exceeded the 10-second measurement budget; this release does not claim every broad query is instantaneous.
+
 ## 0.3.6 — 2026-11-13
 
 - Stop counting an entire relevance bucket just to decide whether a page offset fits inside it. Probe at most offset + 1 matching rows and cache only exhausted buckets as exact counts. This removes a full-index scan from speculative page-two loading while preserving result order, exact total matches and page boundaries.

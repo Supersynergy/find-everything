@@ -431,7 +431,21 @@ export function searchPrepared(index:string,pq:ParsedQuery,limit:number,offset:n
   if(pathOrder&&getMeta(db,'ordered')==='1'&&broad)pageFrom=filtered.replace(' FROM files f JOIN directories d ON d.id=f.parent',' FROM directories d INDEXED BY directory_names CROSS JOIN files f INDEXED BY parent_names ON f.parent=d.id');
   else if(broad){const indexName=indexes[pq.sort||'name'];if(indexName)pageFrom=filtered.replace(' FROM files f JOIN directories d ON d.id=f.parent',` FROM files f INDEXED BY ${indexName} CROSS JOIN directories d ON d.id=f.parent`);}
   let rows:any[];
-  if(ranking&&!pq.fuzzy.length&&!pq.constraints.length&&!pq.favorites&&!pq.sizeFilter&&!pq.dmFilter){
+  // A single lowercase name prefix necessarily matches the full-path literal.
+  // Its lexical tiers (exact/stem and prefix) outrank every non-prefix match,
+  // even with the bounded learned boost. Rank only that indexed name range.
+  const group=termGroups(pq),prefix=ranking&&group.length===1&&group[0].length===1&&/^[a-z0-9_-]+$/.test(group[0][0])&&!pq.constraints.length&&pq.favorites===undefined&&!pq.sizeFilter&&!pq.dmFilter&&!pq.omit?.length&&selections.every(s=>s.boost>=0&&s.boost<=48)?group[0][0]:undefined;
+  let prefixRows:any[]|undefined;
+  if(prefix){
+    const upper=prefix.slice(0,-1)+String.fromCharCode(prefix.charCodeAt(prefix.length-1)+1);
+    const ids=db.query(`SELECT f.id FROM files f INDEXED BY file_names WHERE f.nameKey>=? AND f.nameKey<? ORDER BY ${order} LIMIT ? OFFSET ?`).all(prefix,upper,...ranking!.args,pageLimit,pageOffset);
+    if((preview&&ids.length>0)||ids.length===pageLimit){
+      const fetch=db.query(`SELECT ${FULL} AS path,f.size,f.mtime,f.dir FROM files f JOIN directories d ON d.id=f.parent WHERE f.id=?`);
+      prefixRows=ids.map(r=>fetch.get(r.id));
+    }
+  }
+  if(prefixRows)rows=prefixRows;
+  else if(ranking&&!pq.fuzzy.length&&!pq.constraints.length&&!pq.favorites&&!pq.sizeFilter&&!pq.dmFilter){
     // Empty smart views can stop on the covering name index as soon as a
     // human-content bucket fills the page. No whole-index relevance sort.
     rows=[];let skip=pageOffset;
