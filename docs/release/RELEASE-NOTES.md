@@ -1,4 +1,6 @@
-# Find Everything 0.3.5 · Apple Silicon preview
+# Find Everything 0.3.6 · Apple Silicon preview
+
+Automatic loading of page two no longer counts every file in a relevance tier. A bounded offset probe preserves ordering and exact overall counts, caching only proven exact bucket sizes. No index rebuild or changed display filters are required. See the [latency measurements](../BENCHMARKS-2026-11-13.md#relevance-page-offsets) for the full-index observation and isolated Hyperfine result.
 
 Live subtree updates now handle temporary directories disappearing or becoming files between inspection and traversal. Successful coalesced directory scans replace their previous descendants, removing stale files. Genuine scan errors remain visible; traversal and path budgets remain bounded. Deterministic regressions cover all three cases.
 

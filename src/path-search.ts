@@ -438,7 +438,17 @@ export function searchPrepared(index:string,pq:ParsedQuery,limit:number,offset:n
     const rankedFrom=filtered.replace(' FROM files f JOIN directories d ON d.id=f.parent',' FROM files f INDEXED BY file_names CROSS JOIN directories d ON d.id=f.parent')+` AND ${ranking.sql}=?`;
     for(const score of [0,10,20,25,40,50]){
       const parameters=[...args,...ranking.args,score];
-      if(skip){const key='rank:'+countKey+':'+score;let count=context.counts.get(key)?.matched;if(count===undefined){count=db.query('SELECT count(*) AS n'+rankedFrom).get(...parameters).n;if(context.counts.size>=32)context.counts.delete(context.counts.keys().next().value!);context.counts.set(key,{total:count,known:count,matched:count});}if(skip>=count){skip-=count;continue;}}
+      if(skip){
+        const key='rank:'+countKey+':'+score;let count=context.counts.get(key)?.matched;
+        if(count===undefined){
+          // Only decide whether this bucket contains the requested offset.
+          // Counting every file stalls speculative page two on full-disk indexes.
+          count=db.query('SELECT count(*) AS n FROM (SELECT 1'+rankedFrom+' LIMIT ?)').get(...parameters,skip+1).n;
+          // Reaching the limit gives a lower bound, never an exact bucket size.
+          if(count<=skip){if(context.counts.size>=32)context.counts.delete(context.counts.keys().next().value!);context.counts.set(key,{total:count,known:count,matched:count});}
+        }
+        if(skip>=count){skip-=count;continue;}
+      }
       rows.push(...db.query(`SELECT ${FULL} AS path,f.size,f.mtime,f.dir${rankedFrom} ORDER BY f.nameKey,f.id LIMIT ? OFFSET ?`).all(...parameters,pageLimit-rows.length,skip));
       skip=0;if(rows.length>=pageLimit)break;
     }

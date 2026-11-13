@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.6 — 2026-11-13
+
+- Stop counting an entire relevance bucket just to decide whether a page offset fits inside it. Probe at most offset + 1 matching rows and cache only exhausted buckets as exact counts. This removes a full-index scan from speculative page-two loading while preserving result order, exact total matches and page boundaries.
+- Add pagination regressions across content-type boundaries, including revisits after a bounded probe. An isolated reader on the installed 68-million-path index exceeded 10 seconds before the fix; the candidate returned the same-sized second page in 67 ms. A separate 500,000-row Hyperfine counter fixture measured 358.0 ms versus 22.0 ms; these are bounded observations, not an all-query latency guarantee.
+
 ## 0.3.5 — 2026-11-13
 
 - Recheck directories when a live subtree scan fails. If a temporary directory disappeared or became a file, remove its old descendants and index its current state; retain genuine scanner and permission errors.
