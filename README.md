@@ -1,3 +1,9 @@
+<p align="center">
+  <img src="./docs/release/images/hero.png" alt="Find Everything showing six invoice PDF filename matches across Finance, Clients, Archive and Studio, using name:invoice ext:pdf !draft. Production native views with synthetic demo paths." width="960">
+</p>
+
+*The query matches the **filenames**, not a shared folder called “Invoice”. Production views, synthetic demo files; not a performance benchmark.*
+
 # Find Everything
 
 **Find the file. Keep your flow.**
@@ -10,9 +16,6 @@ Local-first file search for macOS. Find a filename across folders, combine preci
 
 > **Apple Silicon preview — not notarized.** The downloadable build is locally signed, not signed with a trusted Developer ID or Apple-notarized. Gatekeeper may refuse it. We do not recommend disabling Gatekeeper, removing quarantine or changing privacy permissions to bypass this. Build from source with your own signing identity, or wait for a notarized release. Intel and older macOS versions have not been verified.
 
-![Find Everything showing six invoice PDF filename matches across Finance, Clients, Archive and Studio, using name:invoice ext:pdf !draft. Production native views with synthetic demo paths.](./docs/release/images/hero.png)
-
-*The query matches the **filenames**, not a shared folder called “Invoice”. Production views, synthetic demo files; not a performance benchmark.*
 
 ## Features
 
