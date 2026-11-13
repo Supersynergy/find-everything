@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.41 — 2026-11-13
+
+- Add literal punctuation queries, Unicode smart case, explicit case and whole-word controls, native filter controls and read-only query explanations. Preserve quoted type-like text instead of rewriting it.
+- Validate compaction source, stage and backup identities before publication, and reject damaged checkpoints or unknown subcommands without replacing saved files.
+- Bound native AppKit tables to a moving 10,000-row window, retaining global selection, scrolling and direct navigation across tens of millions of results.
+
 ## 0.3.40 — 2026-11-13
 
 - Add resumable compaction from a pinned prepared snapshot, preserving changes after its journal watermark, CR/LF paths, coverage warnings and previous files. Recover interrupted publication before using the snapshot. Keep real journal gaps until explicit reconciliation.

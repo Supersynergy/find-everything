@@ -3,7 +3,7 @@ import SwiftUI
 
 enum SearchQueryOptions {
   static func replacingText(_ text:String,in query:String) -> String {
-    let keys:Set<String>=["name","ext","in","type","is","kind","size","dm","modified","sort","content","duration","channels","samplerate","width","height","favorites","fav","view","omit","learn","audio","video","image"]
+    let keys:Set<String>=["name","ext","in","type","is","kind","size","dm","modified","sort","content","duration","channels","samplerate","width","height","favorites","fav","view","omit","learn","audio","video","image","case","word"]
     let filters=tokens(query).filter {token in
       token.hasPrefix("!") || token.firstIndex(of:":").map{keys.contains(String(token[..<$0]).lowercased())} == true
     }

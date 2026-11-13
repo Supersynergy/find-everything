@@ -40,7 +40,7 @@ interface Flags {
   scope?: string; paths: string[]; name?: string; preset?: string; opts: EngineOpts;
   limit: number; json: boolean; nul: boolean; tui: boolean; fresh: boolean; progress: boolean;
   replace: boolean; names: boolean; port: number; interval: number; help: boolean; version: boolean;
-  model?:string;python?:string;ocr?:boolean;ocrPages?:number;
+  model?:string;python?:string;ocr?:boolean;ocrPages?:number;literal?:boolean;
   socket?: string; snapshot: boolean; maxFiles: number; seconds: number; kind: string; idleSeconds: number; offset: number; parentBound: boolean; query: string; live?: boolean; liveIndexes: string[]; rows:number;sources:string[];
 }
 function numeric(value: string, name: string, min: number, max: number): number {
@@ -75,6 +75,7 @@ function parseFlags(argv: string[]): { pos: string[]; flags: Flags } {
         break;
       }
       case "--json": flags.json = true; break;
+      case "--literal": flags.literal=true;break;
       case '--ocr': flags.ocr=true;break;
       case '--ocr-pages': flags.ocrPages=numeric(value(),a,1,100);if(!Number.isInteger(flags.ocrPages))throw new Error('OCR page limit must be an integer');break;
       case "--model": flags.model=value();break;
@@ -128,6 +129,7 @@ const HELP = `fe — Find Everything ${VERSION}
   fe enrich --index NAME        extract changed media metadata, within a budget
   fe repair-media --index NAME  retry unknown audio once per reader/file version
   fe query-help                 single-line smart fields and examples
+  fe explain QUERY --index NAME  explain matching, visibility and saved index status
   fe favorites list|add|remove  shared favorite paths (absolute paths for add/remove)
   fe learn status|reset|enable|disable  local decaying preferences, shared by app/Raycast
   fe learn open PATH --query Q --index NAME  record a successful file selection
@@ -161,6 +163,7 @@ const HELP = `fe — Find Everything ${VERSION}
   --parent                      serve exits when its calling process exits
   -n, --limit <1–1000>           result limit (default 300)
   --progress-json               index progress as NDJSON; SIGUSR2 pauses/resumes owned workers
+  --literal                     treat search text and punctuation literally
   --json | -0, --null            JSON or NUL-separated paths
   --interval <seconds>           watcher debounce, 0.2–60 (default 1)
   --help, -h | --version, -v
@@ -194,6 +197,7 @@ function selection(flags: Flags): { scope: string; opts: EngineOpts } {
 }
 
 async function cmdSearch(q: string, flags: Flags): Promise<void> {
+  if(flags.literal)q='literal:'+JSON.stringify(q);
   const { scope, opts } = selection(flags);
   if (flags.socket && (flags.paths.length || flags.fresh || Object.keys(flags.opts).length)) throw new Error("Socket searches use saved index settings; refresh separately or omit --socket");
   const result = flags.socket
@@ -316,8 +320,13 @@ async function main(): Promise<void> {
       const result = await indexSounds(scope, flags.query, flags.maxFiles, flags.seconds);
       console.log(JSON.stringify(result)); return;
     }
-    case "search": return cmdSearch(rest.join(" "), flags);
-    case 'compact':{const {scope}=selection(flags);console.log(JSON.stringify(rest[0]==='status'?compactionStatus(scope):await compactIndex(scope,flags.seconds,flags.rows)));return;}
+    case "search": return cmdSearch(rest.length?rest.join(" "):flags.query, flags);
+    case 'explain':{
+      const {scope}=selection(flags),query=rest.length?rest.join(' '):flags.query;
+      const normalizedQuery=normalizeQuery(flags.literal?'literal:'+JSON.stringify(query):query),parsed=parseQuery(normalizedQuery);
+      console.log(JSON.stringify({query,normalizedQuery,index:scope,matching:{case:parsed.matchCase===undefined?'smart':parsed.matchCase?'sensitive':'insensitive',wholeWord:parsed.wholeWord??false,terms:parsed.fuzzy,constraints:parsed.constraints},visibility:{smart:parsed.smart??false,omitted:parsed.omit??[],favoritesOnly:parsed.favorites!==undefined},snapshot:indexStatus().find(s=>s.name===scope)??null,lookup:searchIndexStatus(scope),notes:['Reads saved index metadata; does not scan folders or execute a search.','Explicit size/date filters need known cached properties.','Index warnings remain evidence of incomplete coverage.']}));return;
+    }
+    case 'compact':{if(rest.length>1||(rest.length&&rest[0]!=='status'))throw new Error('Usage: fe compact [status] --index NAME');const {scope}=selection(flags);console.log(JSON.stringify(rest[0]==='status'?compactionStatus(scope):await compactIndex(scope,flags.seconds,flags.rows)));return;}
     case 'reconcile':{const {scope}=selection(flags);console.log(JSON.stringify(await reconcileIndex(scope)));return;}
     case 'combine': {if(!flags.name)throw new Error('Use fe combine --name everything');console.log(JSON.stringify(await combineIndexes(flags.name,flags.sources,flags.replace,flags.seconds)));return;}
     case 'prepare': case 'properties': {

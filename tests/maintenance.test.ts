@@ -83,3 +83,30 @@ test('count cache filenames remain visible without a metadata feedback loop',asy
     const result=await socketRequest(socket,'/v1/search?'+new URLSearchParams({q:'name:counts-demo.sqlite view:all',index:'demo'}));assert(result.paths.includes(file));
   }finally{if(service?.exitCode===null&&service.signalCode===null){const exited=once(service,'exit');service.kill('SIGTERM');await exited;}fs.rmSync(f.dir,{recursive:true,force:true});}
 },10000);
+
+test('recovery refuses an externally changed target or missing stage before renaming anything',()=>{
+  for(const damage of ['target','stage']){
+    const f=fixture();try{
+      const file=path.join(f.root,'keep.txt');fs.writeFileSync(file,'keep');f.run('index',f.root,'--name','demo');f.run('prepare','--index','demo');
+      const target=path.join(f.data,'index-demo.txt'),stage=target+'.compacting';
+      const code=`import fs from 'node:fs';const original=fs.renameSync;fs.renameSync=function(a,b){const result=original(a,b);if(String(b).endsWith('/publish.json'))process.kill(process.pid,'SIGKILL');return result;};const {compactIndex}=await import(${JSON.stringify(path.resolve('src/compaction.ts'))});await compactIndex('demo');`;
+      assert.equal(spawnSync(process.execPath,['--eval',code],{env:f.env,timeout:20000}).signal,'SIGKILL');
+      if(damage==='target')fs.appendFileSync(target,'/external-file\n');else fs.unlinkSync(path.join(stage,'metadata.json'));
+      const before=fs.readFileSync(target),lookup=fs.readFileSync(path.join(f.data,'search-demo.sqlite'));
+      const recovery=spawnSync(process.execPath,[path.resolve('src/cli.ts'),'compact','--index','demo'],{env:f.env,encoding:'utf8',timeout:20000});
+      assert.notEqual(recovery.status,0);assert.match(recovery.stderr,/changed|Missing/);
+      assert(fs.readFileSync(target).equals(before));assert(fs.readFileSync(path.join(f.data,'search-demo.sqlite')).equals(lookup));assert(!fs.existsSync(path.join(stage,'previous.paths')));
+    }finally{fs.rmSync(f.dir,{recursive:true,force:true});}
+  }
+},30000);
+
+test('corrupt checkpoints and unknown compact commands cannot resize or replace the saved index',()=>{
+  const f=fixture();try{
+    fs.writeFileSync(path.join(f.root,'keep.txt'),'x');f.run('index',f.root,'--name','demo');f.run('prepare','--index','demo');f.run('compact','--index','demo','--rows','1');
+    const target=path.join(f.data,'index-demo.txt'),stage=target+'.compacting',state=JSON.parse(fs.readFileSync(path.join(stage,'state.json'),'utf8'));
+    const original=fs.readFileSync(target),size=fs.statSync(path.join(stage,'paths.txt')).size;
+    state.bytes=Number.MAX_SAFE_INTEGER;fs.writeFileSync(path.join(stage,'state.json'),JSON.stringify(state));
+    for(const args of [['compact','--index','demo'],['compact','typo','--index','demo']]){const r=spawnSync(process.execPath,[path.resolve('src/cli.ts'),...args],{env:f.env,encoding:'utf8',timeout:20000});assert.notEqual(r.status,0);}
+    assert.equal(fs.statSync(path.join(stage,'paths.txt')).size,size);assert(fs.readFileSync(target).equals(original));
+  }finally{fs.rmSync(f.dir,{recursive:true,force:true});}
+});

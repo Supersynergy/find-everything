@@ -1927,6 +1927,7 @@ struct SearchView: View {
       ResultColumnsView()
       ResultSortBar()
       ResultFiltersView()
+      if m.resultCount>10_000 {ResultNavigationBar()}
       if let error = m.actionError ?? m.errorMessage ?? m.shortcutWarning {
         HStack {
           Text(error).font(.system(size: 11)).foregroundStyle(.red).lineLimit(3)

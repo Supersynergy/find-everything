@@ -9,8 +9,9 @@ struct DisplayPreferences:Equatable {var compact=true;var fontSize:Double=13}
 @MainActor final class Model:ObservableObject {
   @Published var selectedRows=IndexSet(integer:0)
   @Published var selected=0
-  let resultCount=3
-  let resultIdentity=1,virtualRevision=1,keyboardSelection=0
+  @Published var resultCount=3
+  let resultIdentity=1,virtualRevision=1
+  @Published var keyboardSelection=0
   let display=DisplayPreferences()
   let pinnedPaths:[String]=[]
   let pinnedSet:Set<String>=[]
@@ -92,6 +93,17 @@ struct DisplayPreferences:Equatable {var compact=true;var fontSize:Double=13}
     table.mouseDown(with:down)
     precondition(model.focusCount==1,"Stale results must not accept clicks")
     precondition(app.sendAction(doubleAction,to:table.target,from:table) && model.lastAction.isEmpty,"Stale results must not open")
+    model.canInteractWithResults=true;model.resultCount=68_903_790
+    model.selected=68_903_789;model.selectedRows=IndexSet(integer:model.selected);model.keyboardSelection += 1
+    RunLoop.current.run(until:Date(timeIntervalSinceNow:0.25));host.layoutSubtreeIfNeeded()
+    precondition(table.numberOfRows==10_000,"AppKit row bookkeeping must remain bounded")
+    precondition(table.selectedRow==9_999,"The last global result remains reachable")
+    table.selectRowIndexes(IndexSet(integer:9_998),byExtendingSelection:false)
+    precondition(model.selected==68_903_788,"Pointer selection must map back to global rows")
+    var rowWindow=ResultRowWindow();rowWindow.include(68_903_789,total:68_903_790)
+    precondition(rowWindow.global(rowWindow.local(68_903_789))==68_903_789 && rowWindow.count==10_000)
+    rowWindow.include(0,total:68_903_790);precondition(rowWindow.offset==0)
+    print("Native table: bounded 69M-row window and global last-result navigation pass")
     print("Native table: hit testing, focus hook, extended selection, context actions and stale-result guard pass")
   }
   @MainActor static func findTable(_ view:NSView)->NSTableView? {

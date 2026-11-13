@@ -62,6 +62,7 @@ struct SearchOptionsView: View {
       Toggle("Remember new searches",isOn:$m.display.rememberHistory)
       Divider()
       Text("Visible results").fontWeight(.semibold)
+      Text("The filter bar offers Literal text, Case and Whole words. Literal text preserves ! | * ( ) quotes, emoji and backslashes. Saved searches retain these options.").font(.caption).foregroundStyle(palette.muted)
       Button("Show all indexed files") {m.viewOptions.hideSystem=false;m.viewOptions.hideGenerated=false;m.viewOptions.hideHidden=false;m.viewOptions.hideNoise=false}
       Toggle("Hide macOS system folders",isOn:$m.viewOptions.hideSystem)
       Toggle("Hide generated files and build/cache folders",isOn:$m.viewOptions.hideGenerated)

@@ -13,12 +13,13 @@ export function normalizeQuery(input: string): string {
   let unquoted = input.replace(/"(?:\\.|[^"\\\n])*"/g, s => `\u0001${quoted.push(s) - 1}\u0001`);
   unquoted = unquoted.replace(/\(([^()]*)\)/g, (_, text) => `\u0002${clauses.push(translateIntent(text.replace(/\u0001(\d+)\u0001/g,(_,n)=>quoted[Number(n)])))-1}\u0002`);
   if (/[()]/.test(unquoted)) throw new Error("Use one level of balanced parentheses for natural language; quote literal parentheses");
+  unquoted=unquoted.replace(/\b(audio|video|image|doc|code):(?=\s|$)/gi, "type:$1");
   unquoted=unquoted.replace(/\u0002(\d+)\u0002/g,(_,n)=>clauses[Number(n)]);
   input = unquoted.replace(/\u0001(\d+)\u0001/g, (_, n) => quoted[Number(n)]);
   // Only translate the supported sentence form; other text remains a literal search.
   const sentence = input.match(/^(?:(?:suche|finde|zeig(?:e)?(?: mir)?)\s+)?(?:alle?\s+)?(?:meine?\s+)?(?:sounds?|audios?|samples?|klänge|sounddateien)(?:\s+die)?\s+(?:unter|kürzer als|kuerzer als|weniger als)\s*(\d+(?:[.,]\d+)?)\s*(ms|millisekunden?|s|sekunden?)(?:\s+(?:lang sind|gehen|sind))?[.!?]?$/i);
   if (sentence) return `type:audio duration:<${sentence[1].replace(",", ".")}${sentence[2].toLowerCase().startsWith("m") ? "ms" : "s"}`;
-  return input.replace(/\b(audio|video|image|doc|code):(?=\s|$)/gi, "type:$1");
+  return input;
 }
 
 function translateIntent(text: string): string {
@@ -89,6 +90,7 @@ export function numericFilters(key: string, value: string): NumericFilter[] {
 }
 
 export const QUERY_HELP = {
+  matching:{examples:['literal:"report (final)! | draft"','Ärger case:no','report word:yes','literal:"a*b" case:yes'],notes:'literal: treats every character as text; use JSON quoting for quotes, backslashes and newlines. CLI --literal quotes the entire search argument. case:smart uses Unicode uppercase in plain terms; case:yes/no overrides textual matching. word:yes uses Unicode letters, marks, numbers and underscore as word characters. Folder/type constraints remain structural. fe explain reads the parsed query, visibility filters and saved index warnings without scanning folders.'},
   instantfind:{example:'meaning:"recover a failed deployment" ext:md',setup:'fe instantfind setup --model PATH --python PATH',index:'fe content index --index NAME; fe instantfind index --index NAME',notes:'Optional local meaning search of cached document excerpts; supports existing path/type/date filters. No source scan during a query.'},
   content:{examples:['content:"quarterly revenue" ext:pdf'],commands:['fe content index --index NAME','fe content status --index NAME','fe content clear --index NAME'],notes:'Explicit local document full-text cache. Text/code, extractable PDFs and macOS Office/RTF; local OCR with --ocr. No query-time document reads or directory scans. Private but unencrypted cache; unsupported or changed files remain unknown. Run indexing again after edits.'},
   smartRanking:{examples:['report view:smart','ext:json view:smart','view:all','sort:relevance','learn:off'],commands:['fe learn status','fe learn disable','fe learn enable','fe learn reset'],notes:'App and Raycast default to view:smart: filename relevance, then documents/media ahead of code/config/data. System/generated/hidden/artifact paths are view-filtered, not deleted. Explicit extensions or filenames reveal artifacts. Successful opens train shared local query-scoped decaying preferences; typing alone does not. Explicit sort wins. No external model or query-time traversal.'},

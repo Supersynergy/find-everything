@@ -5,7 +5,7 @@ import {acquireLock} from './catalog';
 import {INDEX_DIR,INDEX_FREE_RESERVE_BYTES,indexPathFor,indexStatus,rebuildIndex} from './engine';
 import {baseStamp,liveRevisionFor,liveStatus,openLive} from './delta';
 import {searchIndexPath} from './path-search';
-import {compactionDirectory,recoverPublishedCompaction,saveCompactionState,syncDirectory,type CompactionState} from './compaction-recovery';
+import {compactionDirectory,recoverPublishedCompaction,saveCompactionState,syncDirectory,fileIdentity,validateCompactionState,type CompactionState} from './compaction-recovery';
 
 export function compactionStatus(index:string){const dir=compactionDirectory(indexPathFor(index));recoverPublishedCompaction(indexPathFor(index));return fs.existsSync(path.join(dir,'state.json'))?JSON.parse(fs.readFileSync(path.join(dir,'state.json'),'utf8')):null;}
 /** Export a pinned prepared snapshot in bounded batches; live changes after its watermark survive. */
@@ -17,6 +17,7 @@ export async function compactIndex(index:string,seconds=30,maxRows=1000000){
     searchRelease=acquireLock(searchIndexPath(index)+'.lock');
     const source=baseStamp(index),stateFile=path.join(dir,'state.json');let state:CompactionState|undefined=fs.existsSync(stateFile)?JSON.parse(fs.readFileSync(stateFile,'utf8')):undefined;
     const journal=openLive();try{journal.query('INSERT OR IGNORE INTO scopes(name,stamp) VALUES (?,?)').run(index,source);}finally{journal.close();}
+    if(state)validateCompactionState(state);
     if(state?.phase==='done'){
       if(state.publishedStamp===source&&liveRevisionFor(index)===state.watermark)return {...state,resumable:false,reused:true,live:liveStatus(index)};
       fs.renameSync(dir,dir+'.backup-'+Date.now());state=undefined;
@@ -42,6 +43,7 @@ export async function compactIndex(index:string,seconds=30,maxRows=1000000){
         state={version:1,source,watermark,lastId:0,rows:0,bytes:0,special:0,phase:'export'};saveCompactionState(dir,state);
       }finally{input.close();}
     }
+    if(!fs.existsSync(path.join(dir,'lookup.sqlite'))||!fs.existsSync(path.join(dir,'paths.txt'))||fs.statSync(path.join(dir,'paths.txt')).size<state.bytes)throw new Error('Incomplete compaction checkpoint; files preserved');
     db=new Database(path.join(dir,'lookup.sqlite'));db.exec('PRAGMA busy_timeout=1000; PRAGMA cache_size=-4096; CREATE TABLE IF NOT EXISTS compact_specials(path TEXT PRIMARY KEY)');
     const output=fs.openSync(path.join(dir,'paths.txt'),'r+');fs.ftruncateSync(output,state.bytes);
     const deadline=performance.now()+seconds*1000;let processed=0,done=false;
@@ -67,6 +69,9 @@ export async function compactIndex(index:string,seconds=30,maxRows=1000000){
     if(state.special)meta.provenanceWarnings.push(`${state.special} CR/LF paths remain in the live overlay.`);
     fs.writeFileSync(path.join(dir,'metadata.json'),JSON.stringify(meta),{mode:0o600});
     // Preserve original scan time, exclusions and gap provenance. Compaction is not reconciliation.
+    state.targets={paths:fileIdentity(file),lookup:fileIdentity(searchIndexPath(index)),metadata:fileIdentity(metadataFile)};
+    state.staged={paths:fileIdentity(path.join(dir,'paths.txt')),lookup:fileIdentity(path.join(dir,'lookup.sqlite')),metadata:fileIdentity(path.join(dir,'metadata.json'))};
+    for(const name of ['paths.txt','lookup.sqlite','metadata.json']){const fd=fs.openSync(path.join(dir,name),'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}}
     state.phase='ready';saveCompactionState(dir,state);
     const intent=path.join(dir,'publish.json'),temporary=path.join(dir,'publish.tmp');fs.copyFileSync(path.join(dir,'state.json'),temporary);const fd=fs.openSync(temporary,'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}fs.renameSync(temporary,intent);syncDirectory(dir);
     recoverPublishedCompaction(file);

@@ -9,6 +9,7 @@ import {omissionRules,omitted,NOISE_NAMES,NOISE_SUFFIXES} from './file-filters';
 import {relevanceOrder,relevanceScore} from './search-ranking';
 import {preparedFileStamp} from './search-cache';
 import {countCacheKey,readExactCounts,writeExactCounts} from './count-cache';
+import {queryMatcher,smartCase,wordMatch} from './query-match';
 
 export const searchIndexPath = (index:string) => path.join(INDEX_DIR,`search-${validateName(index)}.sqlite`);
 const VERSION='3';
@@ -28,7 +29,7 @@ function tune(db:Database) {db.exec('PRAGMA busy_timeout=1000; PRAGMA cache_size
 // Readers keep the whole accelerator reachable through one mapping instead of
 // copying every trigram page through read(2); the page cache grows to 64 MiB so
 // repeated keystrokes stop re-reading the same B-tree and FTS pages.
-function tuneReader(db:Database) {db.function('fe_nfc',{deterministic:true},(s:string)=>s.normalize('NFC'));db.exec('PRAGMA busy_timeout=1000; PRAGMA cache_size=-65536; PRAGMA temp_store=MEMORY; PRAGMA threads=1; PRAGMA mmap_size=2147483648;');}
+function tuneReader(db:Database) {db.function('fe_word',{deterministic:true},(s:string,t:string,c:number)=>Number(wordMatch(s,t,!!c)));db.function('fe_nfc',{deterministic:true},(s:string)=>s.normalize('NFC'));db.exec('PRAGMA busy_timeout=1000; PRAGMA cache_size=-65536; PRAGMA temp_store=MEMORY; PRAGMA threads=1; PRAGMA mmap_size=2147483648;');}
 function closeCached(index:string) {const c=connections.get(index);if(c){c.db.close();connections.delete(index);}}
 function closeProperties(index:string){if(propertyConnection?.index===index){propertyConnection.db.close();propertyConnection=undefined;}}
 function openProperties(index:string):Database|undefined {
@@ -257,9 +258,7 @@ export async function indexProperties(index:string,maxFiles=10000,seconds=60) {
 
 function termGroups(pq:ParsedQuery) {return pq.fuzzy.map(t=>t.startsWith("'")?[t.slice(1)]:t.split('|').filter(Boolean));}
 function matcher(pq:ParsedQuery) {
-  const constraints=pq.constraints.map(c=>({re:new RegExp(c.pattern,'i'),negate:c.negate})),groups=termGroups(pq);
-  const favorites=pq.favorites?new Set(pq.favorites):null;
-  return (p:string)=>{const normalized=p.normalize('NFC');return (!favorites||favorites.has(p))&&!omitted(p,pq.omit)&&constraints.every(c=>c.re.test(normalized)!==c.negate)&&groups.every(g=>g.some(t=>/[A-Z]/.test(t)?normalized.includes(t):normalized.toLowerCase().includes(t.toLowerCase())));};
+  return queryMatcher(pq);
 }
 
 // TEMP lives only in RAM. Keep at most two million integer IDs per connection;
@@ -318,7 +317,7 @@ function sqlPredicate(pq:ParsedQuery,db:Database,index:string,preview=false) {
     args.push(...NOISE_NAMES,...NOISE_SUFFIXES.map(s=>'*'+s.toLowerCase()));
   }
   if(pq.omit?.includes('hidden'))exclusions.push("(f.nameKey GLOB '.*' OR f.parent IN (SELECT id FROM directories WHERE pathKey GLOB '*/.*'))");
-  const literal=(text:string,exact=/[A-Z]/.test(text)):string=>{
+  const literal=(text:string,exact=pq.matchCase??smartCase(text)):string=>{
     const folded=text.toLowerCase(),unicode=/[^\x00-\x7f]/.test(text),normalize=exact&&unicode,legacyUnicode=legacy&&unicode,field=exact?(normalize?'fe_nfc(d.path || f.name)':'d.path || f.name'):(legacyUnicode?'fe_nfc(d.pathKey || f.nameKey)':'d.pathKey || f.nameKey');
     if(preview){
       const term=folded.split('/').filter(s=>[...s].length>=3).sort((a,b)=>b.length-a.length)[0];
@@ -364,23 +363,25 @@ function sqlPredicate(pq:ParsedQuery,db:Database,index:string,preview=false) {
     args.push(exact?text:folded);
     return (pre?pre+' AND ':'')+`instr(${field},?)>0`;
   };
-  for(const group of termGroups(pq))parts.push('('+group.map(t=>'('+literal(t)+')').join(' OR ')+')');
+  const word=(text:string,field:string,exact:boolean)=>{args.push(text,Number(exact));return `fe_word(${field},?,?)=1`;};
+  for(const group of termGroups(pq))parts.push('('+group.map(t=>{let test=literal(t);if(pq.wholeWord)test+=' AND '+word(t,FULL,pq.matchCase??smartCase(t));return '('+test+')';}).join(' OR ')+')');
   for(const c of pq.constraints){
     if(c.suffixes){const seeded=parts.some(p=>p.includes('names_fts')||p.includes('directories_fts'));const suffixes=c.suffixes.map(s=>{let pre='';const quoted='"'+s.replace(/"/g,'""')+'"';if(!seeded&&[...s].length>=3&&seed('names_fts',quoted)){args.push(quoted);pre='f.id IN (SELECT rowid FROM names_fts WHERE names_fts MATCH ?) AND ';}args.push('*'+s);return '('+pre+'f.nameKey GLOB ?)';});parts.push('('+suffixes.join(' OR ')+')');}
     else if(c.literal!==undefined){
       let test:string;
       if(c.field==='folder'){
-        const value=c.literal.toLowerCase();
-        if(c.prefix&&!(legacy&&/[^\x00-\x7f]/.test(value))){args.push(value,value.slice(0,-1)+'0');test='f.parent IN (SELECT id FROM directories WHERE pathKey>=? AND pathKey<?)';}
-        else {args.push(value);test=`f.parent IN (SELECT id FROM directories WHERE instr(${legacy? 'fe_nfc(pathKey)':'pathKey'},?)${c.prefix?'=1':'>0'})`;}
+        const exact=pq.matchCase===true,value=exact?c.literal:c.literal.toLowerCase();
+        if(c.prefix&&!exact&&!(legacy&&/[^\x00-\x7f]/.test(value))){args.push(value,value.slice(0,-1)+'0');test='f.parent IN (SELECT id FROM directories WHERE pathKey>=? AND pathKey<?)';}
+        else {args.push(value);test=`f.parent IN (SELECT id FROM directories WHERE instr(${exact?'fe_nfc(path)':legacy? 'fe_nfc(pathKey)':'pathKey'},?)${c.prefix?'=1':'>0'})`;}
       }else if(c.field==='name'){
         const value=c.literal.toLowerCase(),legacyUnicode=legacy&&/[^\x00-\x7f]/.test(value),useFts=!legacyUnicode&&[...value].length>=3&&seed('names_fts','"'+value.replace(/"/g,'""')+'"');
         if(useFts)args.push('"'+value.replace(/"/g,'""')+'"');
-        args.push(value);test=(useFts?'f.id IN (SELECT rowid FROM names_fts WHERE names_fts MATCH ?) AND ':'')+`instr(${legacyUnicode?'fe_nfc(f.nameKey)':'f.nameKey'},?)>0`;
-      }else test=literal(c.literal,false);
+        args.push(pq.matchCase===true?c.literal:value);test=(useFts?'f.id IN (SELECT rowid FROM names_fts WHERE names_fts MATCH ?) AND ':'')+`instr(${pq.matchCase===true?'fe_nfc(f.name)':legacyUnicode?'fe_nfc(f.nameKey)':'f.nameKey'},?)>0`;
+      }else test=literal(c.literal,pq.matchCase??false);
+      if(pq.wholeWord&&c.field!=='folder')test+=' AND '+word(c.literal,c.field==='name'?'f.name':FULL,pq.matchCase??false);
       parts.push(c.negate?'NOT ('+test+')':'('+test+')');
     }
-    else if(c.alternatives)parts.push('('+c.alternatives.map(t=>'('+literal(t,false)+')').join(' OR ')+')');
+    else if(c.alternatives)parts.push('('+c.alternatives.map(t=>'('+literal(t,pq.matchCase??false)+')').join(' OR ')+')');
     else throw new Error('Unsupported indexed constraint');
   }
   const baseSql=parts.filter(p=>p.replace(/[()\s]/g,'')!=='1').join(' AND ')||'1',baseArgs=[...args];
@@ -444,7 +445,7 @@ export function searchPrepared(index:string,pq:ParsedQuery,limit:number,offset:n
   let coverage=context.counts.get(countKey);
   // Small scopes count cheaply; avoid disk writes on their interactive path.
   const durableKey=context.rows>=100000?countCacheKey([s.dev,context.inode,s.mtimeMs,s.size,source,liveRevision,propertiesRevision],
-    [pq.fuzzy,pq.constraints,pq.omit,pq.favorites,pq.sizeFilter,pq.dmFilter,usesSize,usesDate,timeBucket]):undefined;
+    [pq.fuzzy,pq.constraints,pq.matchCase,pq.wholeWord,pq.omit,pq.favorites,pq.sizeFilter,pq.dmFilter,usesSize,usesDate,timeBucket]):undefined;
   if(!coverage&&!preview&&durableKey){coverage=readExactCounts(index,durableKey);if(coverage){if(context.counts.size>=64)context.counts.delete(context.counts.keys().next().value!);context.counts.set(countKey,coverage);}}
   if(!coverage&&!preview){
     const value={total:total(),known:0};
@@ -473,7 +474,7 @@ export function searchPrepared(index:string,pq:ParsedQuery,limit:number,offset:n
   // A single lowercase name prefix necessarily matches the full-path literal.
   // Its lexical tiers (exact/stem and prefix) outrank every non-prefix match,
   // even with the bounded learned boost. Rank only that indexed name range.
-  const group=termGroups(pq),prefix=ranking&&group.length===1&&group[0].length===1&&/^[a-z0-9_-]+$/.test(group[0][0])&&!pq.constraints.length&&pq.favorites===undefined&&!pq.sizeFilter&&!pq.dmFilter&&!pq.omit?.length&&selections.every(s=>s.boost>=0&&s.boost<=48)?group[0][0]:undefined;
+  const group=termGroups(pq),prefix=ranking&&!pq.wholeWord&&pq.matchCase!==true&&group.length===1&&group[0].length===1&&/^[a-z0-9_-]+$/.test(group[0][0])&&!pq.constraints.length&&pq.favorites===undefined&&!pq.sizeFilter&&!pq.dmFilter&&!pq.omit?.length&&selections.every(s=>s.boost>=0&&s.boost<=48)?group[0][0]:undefined;
   let prefixRows:any[]|undefined;
   if(prefix){
     const upper=prefix.slice(0,-1)+String.fromCharCode(prefix.charCodeAt(prefix.length-1)+1);

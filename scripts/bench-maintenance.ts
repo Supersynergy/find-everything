@@ -30,7 +30,7 @@ else if(mode==='compare'){
   const before=run(baseline,data),after=run(candidate,data);assert.deepEqual(after.map(r=>r.signature),before.map(r=>r.signature));
   fs.writeFileSync(path.join(out,'first.json'),JSON.stringify({before,after},null,2));
   const command=(cli:string)=>[process.execPath,path.resolve('scripts/bench-maintenance.ts'),'run',cli,data].map(s=>"'"+s.replaceAll("'","'\\''")+"'").join(' ');
-  execFileSync('hyperfine',['--warmup','1','--runs','3','--metrics','time','--export-json',path.join(out,'hyperfine.json'),'--command-name','0.3.9',command(baseline),'--command-name','0.3.40',command(candidate)],{stdio:'inherit',timeout:120000});
+  execFileSync('hyperfine',['--warmup','1','--runs','3','--metrics','time','--export-json',path.join(out,'hyperfine.json'),'--command-name',execFileSync(baseline,['--version'],{encoding:'utf8'}).trim(),command(baseline),'--command-name',execFileSync(candidate,['--version'],{encoding:'utf8'}).trim(),command(candidate)],{stdio:'inherit',timeout:120000});
   const report={passed:true,rows,queries,requestsPerCommand:6,baselineSha256:sha(baseline),candidateSha256:sha(candidate),first: {before,after},hyperfine:JSON.parse(fs.readFileSync(path.join(out,'hyperfine.json'),'utf8')),limits:['Saved synthetic names; no file traversal','Six fresh CLI processes per command; no native UI timing','One warmup and three measured commands per version','OS cache state uncontrolled; compare is specific to repeated exact counts across process restarts','First unseen queries still compute their exact counts']};
   fs.writeFileSync(path.join(out,'summary.json'),JSON.stringify(report,null,2));
 }else throw new Error('Usage: compare BASELINE CANDIDATE OUTPUT | run CLI DATA');

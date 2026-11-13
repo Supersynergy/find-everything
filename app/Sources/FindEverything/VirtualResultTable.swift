@@ -1,6 +1,22 @@
 import AppKit
 import SwiftUI
 
+/// AppKit keeps per-row bookkeeping even when cell views are reused.
+/// Bound that bookkeeping while retaining global result coordinates.
+struct ResultRowWindow {
+  static let capacity=10_000
+  var offset=0
+  var total=0
+  var count:Int {min(Self.capacity,max(0,total-offset))}
+  mutating func include(_ row:Int,total:Int) {
+    self.total=max(0,total)
+    offset=min(offset,max(0,self.total-Self.capacity))
+    if row<offset || row>=offset+count {offset=max(0,min(row-Self.capacity/2,self.total-Self.capacity))}
+  }
+  func global(_ local:Int)->Int {offset+local}
+  func local(_ global:Int)->Int {global-offset}
+}
+
 /// Read-only cells let the native table receive mouse selection and drag events.
 private final class ResultHostingView:NSHostingView<AnyView> {
   override func hitTest(_ point:NSPoint) -> NSView? {nil}
@@ -40,7 +56,7 @@ struct VirtualResultTable: NSViewRepresentable {
     table.target=context.coordinator;table.doubleAction=#selector(Coordinator.openDoubleClicked(_:))
     table.menuForRow = {[weak coordinator=context.coordinator] row in coordinator?.menu(row:row)}
     table.beginMouseSelection = {[weak coordinator=context.coordinator] row in
-      coordinator?.parent.m.beginMouseSelection(row) ?? false
+      coordinator.map{$0.parent.m.beginMouseSelection($0.window.global(row))} ?? false
     }
     table.setAccessibilityLabel("All search results")
     m.focusResultsField = { [weak table] in if let table {table.window?.makeFirstResponder(table)} }
@@ -63,6 +79,7 @@ struct VirtualResultTable: NSViewRepresentable {
     private var selected = -1, display: DisplayPreferences?, pins: [String] = []
     private var selection=IndexSet()
     private var updating = false
+    private(set) var window=ResultRowWindow()
     private var menuActions:[String:()->Void]=[:]
     init(_ parent: VirtualResultTable) { self.parent = parent }
     deinit { if let observation { NotificationCenter.default.removeObserver(observation) } }
@@ -71,8 +88,9 @@ struct VirtualResultTable: NSViewRepresentable {
         MainActor.assumeIsolated { if let scroll { self?.requestViewport(scroll) } }
       }
     }
-    func numberOfRows(in tableView: NSTableView) -> Int { parent.m.resultCount }
+    func numberOfRows(in tableView: NSTableView) -> Int { window.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+      let row=window.global(row)
       let id = NSUserInterfaceItemIdentifier("result-row")
       let view = tableView.makeView(withIdentifier: id, owner: self) as? ResultHostingView ?? ResultHostingView(rootView: AnyView(EmptyView()))
       view.identifier = id
@@ -83,12 +101,12 @@ struct VirtualResultTable: NSViewRepresentable {
     func tableViewSelectionDidChange(_ notification: Notification) {
       guard !updating,let table=notification.object as? NSTableView,!table.selectedRowIndexes.isEmpty else {return}
       let lead=table.clickedRow>=0 && table.selectedRowIndexes.contains(table.clickedRow) ? table.clickedRow : table.selectedRow
-      parent.m.selectRows(table.selectedRowIndexes,lead:lead)
+      parent.m.selectRows(IndexSet(table.selectedRowIndexes.map{window.global($0)}),lead:window.global(lead))
     }
     func tableView(_ tableView:NSTableView,pasteboardWriterForRow row:Int) -> NSPasteboardWriting? {
       guard parent.m.canInteractWithResults,tableView.selectedRowIndexes.count<=1000,
-        tableView.selectedRowIndexes.allSatisfy({parent.m.cachedResult(at:$0) != nil}) else {return nil}
-      return parent.m.cachedResult(at:row).map{NSURL(fileURLWithPath:$0.path)}
+        tableView.selectedRowIndexes.allSatisfy({parent.m.cachedResult(at:window.global($0)) != nil}) else {return nil}
+      return parent.m.cachedResult(at:window.global(row)).map{NSURL(fileURLWithPath:$0.path)}
     }
     @objc func openDoubleClicked(_ sender:Any?) {if parent.m.canInteractWithResults {parent.m.openSelection()}}
     @objc private func invokeMenu(_ sender:NSMenuItem) {
@@ -101,6 +119,7 @@ struct VirtualResultTable: NSViewRepresentable {
       item.target=self;item.representedObject=key;return item
     }
     func menu(row:Int) -> NSMenu? {
+      let row=window.global(row)
       let m=parent.m
       guard m.canInteractWithResults else {return nil}
       guard let result=m.cachedResult(at:row) else {m.requestResults(row..<(row+1));return nil}
@@ -139,24 +158,30 @@ struct VirtualResultTable: NSViewRepresentable {
       guard let table = scroll.documentView as? NSTableView else { return }
       updating = true; defer { updating = false }
       let model = parent.m
+      let oldOffset=window.offset
+      if identity != model.resultIdentity {window.offset=0}
+      window.include(keyboard != model.keyboardSelection ? model.selected : window.offset,total:model.resultCount)
+      let shifted=oldOffset != window.offset
+      table.setAccessibilityHelp("Results \(window.offset+1)–\(window.offset+window.count) of \(model.resultCount). Use First, Last or Go to result to jump; scrolling continues into adjacent ranges.")
       let height = (model.display.compact ? max(28, model.display.fontSize + 15) : max(44, model.display.fontSize * 2 + 22)) + (model.hasResultGroups ? 20 : 0)
       if table.rowHeight != height { table.rowHeight = height }
-      if identity != model.resultIdentity {
+      if identity != model.resultIdentity || shifted {
         identity = model.resultIdentity; table.reloadData(); scroll.contentView.scroll(to: .zero)
-      } else if table.numberOfRows != model.resultCount { table.noteNumberOfRowsChanged() }
+      } else if table.numberOfRows != window.count { table.noteNumberOfRowsChanged() }
       if revision != model.virtualRevision || selected != model.selected || selection != model.selectedRows || display != model.display || pins != model.pinnedPaths {
         revision = model.virtualRevision
         selected=model.selected;selection=model.selectedRows;display=model.display;pins=model.pinnedPaths
         let visible = table.rows(in: scroll.contentView.bounds)
         if visible.location != NSNotFound, visible.length > 0 {
-          table.reloadData(forRowIndexes: IndexSet(integersIn: visible.location..<min(model.resultCount, NSMaxRange(visible))), columnIndexes: IndexSet(integer: 0))
+          table.reloadData(forRowIndexes: IndexSet(integersIn: visible.location..<min(window.count, NSMaxRange(visible))), columnIndexes: IndexSet(integer: 0))
         }
       }
-      let valid=ResultSelection.bounded(model.selectedRows,count:model.resultCount)
+      let visibleSelection=model.selectedRows.intersection(IndexSet(integersIn:window.offset..<(window.offset+window.count)))
+      let valid=IndexSet(visibleSelection.map{window.local($0)})
       if table.selectedRowIndexes != valid {table.selectRowIndexes(valid,byExtendingSelection:false)}
       if keyboard != model.keyboardSelection {
         keyboard = model.keyboardSelection
-        if model.resultCount > 0 { table.scrollRowToVisible(model.selected) }
+        if model.resultCount > 0 { table.scrollRowToVisible(window.local(model.selected)) }
       }
       if model.resultFocused,!model.showOptions,!model.editingColumnFilter,!model.showActions,!model.showHelp,
         let window=table.window,window.firstResponder !== table {window.makeFirstResponder(table)}
@@ -166,7 +191,20 @@ struct VirtualResultTable: NSViewRepresentable {
       guard let table = scroll.documentView as? NSTableView, parent.m.resultCount > 0 else { return }
       let range = table.rows(in: scroll.contentView.bounds)
       guard range.location != NSNotFound, range.length > 0 else { return }
-      parent.m.requestResults(range.location..<min(parent.m.resultCount, NSMaxRange(range)))
+      let first=window.global(range.location),last=min(parent.m.resultCount,window.global(NSMaxRange(range)))
+      if !updating,window.total>ResultRowWindow.capacity {
+        let direction = range.location<40 && window.offset>0 ? -1 : NSMaxRange(range)>window.count-40 && window.offset+window.count<window.total ? 1 : 0
+        if direction != 0 {
+          updating=true
+          window.offset=max(0,min(window.offset+direction*ResultRowWindow.capacity/2,window.total-ResultRowWindow.capacity))
+          table.reloadData()
+          table.selectRowIndexes(IndexSet(parent.m.selectedRows.intersection(IndexSet(integersIn:window.offset..<(window.offset+window.count))).map{window.local($0)}),byExtendingSelection:false)
+          scroll.contentView.scroll(to:NSPoint(x:0,y:table.rect(ofRow:window.local(first)).minY))
+          scroll.reflectScrolledClipView(scroll.contentView)
+          updating=false
+        }
+      }
+      parent.m.requestResults(first..<last)
     }
   }
 }
