@@ -1,0 +1,150 @@
+{
+  "version": "0.3.41",
+  "date": "2026-11-13",
+  "passed": true,
+  "rows": 1000000,
+  "normal": {
+    "queries": [
+      "ne sort:name view:all",
+      "al sort:name view:all"
+    ],
+    "processesPerRun": 6,
+    "warmups": 1,
+    "runs": 3,
+    "results": [
+      {
+        "version": "fe 0.3.40",
+        "wallMs": 382.04725,
+        "stdevMs": 9.17293998587013,
+        "cpuMs": 369.22166666666664,
+        "measurements": [
+          {
+            "wallMs": 387.711625,
+            "cpuMs": 378.051,
+            "exitCode": 0
+          },
+          {
+            "wallMs": 371.464,
+            "cpuMs": 356.60800000000006,
+            "exitCode": 0
+          },
+          {
+            "wallMs": 386.96612500000003,
+            "cpuMs": 373.006,
+            "exitCode": 0
+          }
+        ]
+      },
+      {
+        "version": "fe 0.3.41",
+        "wallMs": 432.32631933333334,
+        "stdevMs": 9.057915202451193,
+        "cpuMs": 363.86766666666665,
+        "measurements": [
+          {
+            "wallMs": 426.78987500000005,
+            "cpuMs": 378.11599999999993,
+            "exitCode": 0
+          },
+          {
+            "wallMs": 427.409708,
+            "cpuMs": 362.45099999999996,
+            "exitCode": 0
+          },
+          {
+            "wallMs": 442.779375,
+            "cpuMs": 351.03599999999994,
+            "exitCode": 0
+          }
+        ]
+      }
+    ],
+    "relativeWallChange": 0.1316043220657479
+  },
+  "newModes": {
+    "queries": [
+      {
+        "query": "literal:\"neo-0000000.txt\" case:yes",
+        "matched": 1
+      },
+      {
+        "query": "literal:\"neo\" word:yes case:no",
+        "matched": 666667
+      },
+      {
+        "query": "name:\"alpha\" word:yes case:no",
+        "matched": 333333
+      }
+    ],
+    "processesPerRun": 3,
+    "warmups": 1,
+    "runs": 3,
+    "result": {
+      "wallMs": 213.09586133333335,
+      "stdevMs": 39.01707246538107,
+      "cpuMs": 178.38033333333334,
+      "measurements": [
+        {
+          "wallMs": 257.25475000000006,
+          "cpuMs": 187.496,
+          "exitCode": 0
+        },
+        {
+          "wallMs": 183.281667,
+          "cpuMs": 169.74999999999997,
+          "exitCode": 0
+        },
+        {
+          "wallMs": 198.751167,
+          "cpuMs": 177.895,
+          "exitCode": 0
+        }
+      ]
+    }
+  },
+  "native": {
+    "indexedResultFixture": 68903790,
+    "tableRowBound": 10000,
+    "installedNativeSamples": [
+      {
+        "rssKiB": 104880,
+        "cpuPercent": 0.1,
+        "ts": "2026-11-13T05:06:46.576Z"
+      },
+      {
+        "rssKiB": 103376,
+        "cpuPercent": 0,
+        "ts": "2026-11-13T05:07:01.582Z"
+      },
+      {
+        "rssKiB": 107632,
+        "cpuPercent": 0.1,
+        "ts": "2026-11-13T05:07:16.588Z"
+      },
+      {
+        "rssKiB": 110464,
+        "cpuPercent": 0.5,
+        "ts": "2026-11-13T05:07:31.593Z"
+      }
+    ],
+    "before": {
+      "nativePid": 67799,
+      "rssKiB": 23565760,
+      "cpuPercent": 100,
+      "ts": "2026-11-13T05:05:11.602Z",
+      "version": "fe 0.3.40"
+    },
+    "immediatePredecessor": {
+      "version": "fe 0.3.8",
+      "rssKiB": 1040576
+    },
+    "observedSeconds": 45
+  },
+  "limits": [
+    "Synthetic saved-name index, no filesystem traversal during queries",
+    "Repeated exact counts; OS cache state uncontrolled",
+    "Separate CLI startup included in every request",
+    "Small sample on shared host; no universal speedup claim",
+    "Off-screen native harness plus installed resource observation; no competitor/UI latency comparison"
+  ]
+}

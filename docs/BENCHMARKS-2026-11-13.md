@@ -88,3 +88,38 @@ bun scripts/bench-cache.ts /path/to/fe-0.3.7 /path/to/fe-0.3.8 /path/to/evidence
 ```
 
 See [the machine-readable summary](benchmarks/2026-11-13/cache-summary.json) for binary/fixture hashes and command-level results. Earlier JSON outputs are preserved when the fixture is reused. Limits: OS caches are uncontrolled; service launch and cold query are included in Hyperfine, but not in the warm API table. The corpus contains stored synthetic filenames, with no query-time directory traversal. These measurements are not a 68-million-row cold-query or native-UI benchmark. No bigram index, bitmap library or alternative backend is introduced.
+
+## Live processing and API responsiveness
+
+Version 0.3.9 moves the existing live event/metadata pipeline into one owned process. The search reader synchronizes the requested scope before reading its prepared snapshot. The API no longer performs those synchronous batches itself. Existing parent-death cleanup is reused, and pending responses and journal gaps remain explicit.
+
+A short installed 0.3.8 diagnostic on a prepared index reporting 68,903,785 rows found one timeout among six health probes at a 2-second deadline. Three name-ordered pages took 3.22–14.79 ms. The first observed `ne` preview took 509.53 ms, followed by 12.86 and 2.70 ms. All replies remained incomplete with existing warnings. These are spot observations under concurrent activity, not cold-start or stable-tail measurements. A one-second sample placed the busy main thread in JSC/JIT code without enough symbols to identify a specific function; the source and controlled replay establish the event-loop bottleneck more directly.
+
+The controlled comparison replays 6,000 previously indexed, now absent paths into four scopes sharing the same root: 24,000 scoped updates. One real `stable.txt` remains. Each run starts its own service, probes `/health` twelve times during processing, verifies the exact remaining path in every scope, then injects a history gap and verifies the incomplete warning. Three runs per version passed all membership and warning assertions. Fixture roots and timestamps differ; relative names and event sequences are identical.
+
+| Controlled replay, three runs per version | 0.3.8 | 0.3.9 |
+|---|---:|---:|
+| Health successes / probes | 33 / 36 | 36 / 36 |
+| Timeouts at 500 ms | 3 | 0 |
+| Completed health p50 / p95 | 0.54 / 90.41 ms | 0.53 / 1.07 ms |
+| Maximum completed health response | 143.66 ms | 1.37 ms |
+| First query per updated scope, median | 3.39 ms | 102.15 ms |
+| Trigger to all four verified query results, median | 1,217.06 ms | 1,030.33 ms |
+| Observed summed process RSS after verification, median | 150.02 MiB | 221.92 MiB |
+
+The first updated-scope query now pays the synchronization cost. The previous version paid it in the background while blocking the API. The new process structure used about 72 MiB more observed summed RSS after processing, with about 44 MiB more before processing. RSS sums include shared pages and are neither peak nor unique physical memory. Trigger-to-results includes fixed sleeps and sequential probes; it is not a per-event freshness distribution. Timed-out requests are censored and excluded from the completed-response percentiles.
+
+Hyperfine 2.0.0 measured two baseline runs and three final combined candidate runs, grouped by version, with no warmups. The first baseline run was measured separately; earlier measurements of the unmerged candidate were retained. Command-level wall time includes fixture creation/preparation, startup, replay, fixed waits, probes and cleanup: 2.566 ± 0.031 s versus 2.366 ± 0.103 s. Reported CPU time was 1.865 ± 0.062 s versus 1.009 ± 0.031 s. Those whole-harness observations do not establish the CPU saving for the installed large index. OS caches and concurrent host activity were uncontrolled; there were only two baseline and three candidate Hyperfine samples. Hyperfine flagged the first candidate run as slower, consistent with uncontrolled cache state.
+
+Reproduce one run per executable in fresh output directories:
+
+```sh
+bun scripts/bench-live.ts --replay /path/to/fe-0.3.8 /private/evidence/baseline 6000
+bun scripts/bench-live.ts --replay /path/to/fe-0.3.9 /private/evidence/candidate 6000
+```
+
+See [the live summary](benchmarks/2026-11-13/live-summary.json) for binary/corpus hashes and individual run measurements, and [the integration plan](research/2026-11-13-live-integration.md) for the next bounded improvements. The controlled replay is not a 69-million-row search or native interaction benchmark. Existing journal gaps still need explicit reconciliation; this release does not claim complete current filesystem coverage.
+
+After installation, the native-owned 0.3.9 service completed all six health probes in 0.14–5.66 ms. The first name-ordered page took 400.31 ms, then 1.70 and 1.41 ms; the first observed `ne` preview took 218.54 ms, then 1.94 and 1.12 ms. These short samples have different cache/startup state from the earlier installed baseline and do not establish an overall speed factor. The exact saved-row count remained 68,903,785. Replies still reported incomplete coverage and the existing warnings. Two existing DE/EN meaning-search smoke cases retained the expected first file in the combined installation. The separate Instantfind chat completed a 610-second idle check before this installation; that evidence is separate from this release's functional smoke.
+
+The native app and its window were present, but the read-only AX observer could not match an accessible window. Native source harnesses passed; interactive focus, typing latency and keyboard acceptance were not measured in this release.

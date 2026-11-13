@@ -1,0 +1,214 @@
+{
+  "passed": true,
+  "pairs": 3,
+  "eventsPerReplay": 24000,
+  "date": "2026-11-13T04:14:19.891Z",
+  "baselineSha256": "4142cb9b4f30656bfd6528caabadb27476cc6d546a9184ef294760bdfb6aa8fa",
+  "candidateSha256": "c1b88ba0fab83a1580c5cd2fa8f61ab0854a467d5abed154f1b5f69d711a2302",
+  "relativeCorpusSha256": "fa5f7acf7f9a48ecaf0423155bacc556e3be52a2fb1f3b40b02119315a1ac63c",
+  "variants": {
+    "baseline": {
+      "cliSha256": "4142cb9b4f30656bfd6528caabadb27476cc6d546a9184ef294760bdfb6aa8fa",
+      "replays": 3,
+      "health": {
+        "samples": 36,
+        "successes": 33,
+        "timeouts": 3,
+        "p50Ms": 0.5352919999997994,
+        "p95CompletedMs": 90.409042,
+        "maxCompletedMs": 143.6567090000001,
+        "deadlineMs": 500
+      },
+      "visibleMedianMs": 1217.055833,
+      "searchAfterUpdatesMedianMs": 3.3887500000000728,
+      "observedRssBeforeMedianKiB": 78896,
+      "observedRssAfterMedianKiB": 153616,
+      "runs": [
+        {
+          "summary": {
+            "successes": 11,
+            "timeouts": 1,
+            "p50Ms": 0.5380840000002536,
+            "p95Ms": 143.6567090000001,
+            "maxCompletedMs": 143.6567090000001
+          },
+          "visibleMs": 1271.330708,
+          "queries": [
+            3.4389580000001843,
+            3.548667000000023,
+            3.259207999999944,
+            3.3887500000000728
+          ],
+          "gapPreserved": true
+        },
+        {
+          "summary": {
+            "successes": 11,
+            "timeouts": 1,
+            "p50Ms": 0.42904199999998127,
+            "p95Ms": 62.946916999999985,
+            "maxCompletedMs": 62.946916999999985
+          },
+          "visibleMs": 1190.3234580000003,
+          "queries": [
+            5.398750000000291,
+            3.1070830000003298,
+            2.8246249999997417,
+            2.499959000000217
+          ],
+          "gapPreserved": true
+        },
+        {
+          "summary": {
+            "successes": 11,
+            "timeouts": 1,
+            "p50Ms": 0.5394169999999576,
+            "p95Ms": 90.409042,
+            "maxCompletedMs": 90.409042
+          },
+          "visibleMs": 1217.055833,
+          "queries": [
+            4.426916000000347,
+            3.6099999999996726,
+            3.302541999999903,
+            4.044000000000324
+          ],
+          "gapPreserved": true
+        }
+      ]
+    },
+    "candidate": {
+      "cliSha256": "c1b88ba0fab83a1580c5cd2fa8f61ab0854a467d5abed154f1b5f69d711a2302",
+      "replays": 3,
+      "health": {
+        "samples": 36,
+        "successes": 36,
+        "timeouts": 0,
+        "p50Ms": 0.5330000000001291,
+        "p95CompletedMs": 1.06574999999998,
+        "maxCompletedMs": 1.3690420000000358,
+        "deadlineMs": 500
+      },
+      "visibleMedianMs": 1030.330333,
+      "searchAfterUpdatesMedianMs": 102.14708399999995,
+      "observedRssBeforeMedianKiB": 123856,
+      "observedRssAfterMedianKiB": 227248,
+      "runs": [
+        {
+          "summary": {
+            "successes": 12,
+            "timeouts": 0,
+            "p50Ms": 0.5867499999999382,
+            "p95Ms": 1.3690420000000358,
+            "maxCompletedMs": 1.3690420000000358
+          },
+          "visibleMs": 1170.4855829999997,
+          "queries": [
+            104.22462500000006,
+            104.61987500000009,
+            102.18074999999999,
+            100.4644579999997
+          ],
+          "gapPreserved": true
+        },
+        {
+          "summary": {
+            "successes": 12,
+            "timeouts": 0,
+            "p50Ms": 0.5212910000000193,
+            "p95Ms": 0.7919170000000122,
+            "maxCompletedMs": 0.7919170000000122
+          },
+          "visibleMs": 1030.330333,
+          "queries": [
+            111.02433399999995,
+            102.33687499999996,
+            105.41658300000017,
+            99.45966599999997
+          ],
+          "gapPreserved": true
+        },
+        {
+          "summary": {
+            "successes": 12,
+            "timeouts": 0,
+            "p50Ms": 0.47612500000013824,
+            "p95Ms": 1.06574999999998,
+            "maxCompletedMs": 1.06574999999998
+          },
+          "visibleMs": 1017.6420840000001,
+          "queries": [
+            102.14708399999995,
+            100.80916699999989,
+            101.39941699999986,
+            99.86900000000014
+          ],
+          "gapPreserved": true
+        }
+      ]
+    }
+  },
+  "hyperfine": {
+    "version": "2.0.0",
+    "measuredRuns": {
+      "baseline": 2,
+      "candidate": 3
+    },
+    "warmups": 0,
+    "results": [
+      {
+        "name": "0.3.8",
+        "wall": {
+          "unit": "second",
+          "count": 2,
+          "mean": 2.5659828750000004,
+          "stddev": 0.0306908497802606,
+          "median": 2.5659828750000004,
+          "min": 2.5442811670000003,
+          "max": 2.587684583
+        },
+        "cpu": {
+          "unit": "second",
+          "count": 2,
+          "mean": 1.8645805000000002,
+          "stddev": 0.06181315349098448,
+          "median": 1.8645805000000002,
+          "min": 1.820872,
+          "max": 1.9082890000000001
+        }
+      },
+      {
+        "name": "0.3.9",
+        "wall": {
+          "unit": "second",
+          "count": 3,
+          "mean": 2.3660755276666667,
+          "stddev": 0.10324997713851036,
+          "median": 2.309551625,
+          "min": 2.3034290410000002,
+          "max": 2.485245917
+        },
+        "cpu": {
+          "unit": "second",
+          "count": 3,
+          "mean": 1.0094573333333334,
+          "stddev": 0.03138213976664643,
+          "median": 0.996321,
+          "min": 0.9867779999999999,
+          "max": 1.045273
+        }
+      }
+    ]
+  },
+  "limits": [
+    "Controlled deletion replay; four scopes share 6001 relative names, separate fixture roots/timestamps",
+    "Baseline first run direct, two further runs by Hyperfine; final merged candidate three runs by Hyperfine",
+    "Variant groups, not randomized/interleaved; earlier unmerged candidate measurements retained privately",
+    "No OS cache purge; concurrent host activity uncontrolled",
+    "Health p95 covers completed requests only; timed-out requests remain censored at 500 ms",
+    "Visibility includes fixed sleeps and sequential health/query probes; not a per-event freshness latency",
+    "Process RSS sum is observed, not peak or unique physical memory",
+    "Hyperfine wall/CPU cover fixture preparation, service startup, replay, probes and shutdown",
+    "Not a native UI benchmark or 68-million-row search distribution"
+  ]
+}

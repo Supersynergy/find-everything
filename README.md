@@ -10,9 +10,11 @@
 
 Local-first file search for macOS. Find a filename across folders, combine precise filters, preview the result and get back to work. Native SwiftUI/AppKit app · JSON CLI · local API · MCP · optional Raycast extension.
 
-**New in 0.3.8:** retain exact filename counts and candidate caches across metadata updates, share identical running searches with independent client cancellation, and keep unrelated index updates from evicting cached results. Existing indexes stay usable without rebuilding. Short relevance previews remain provisional; first-time broad searches and exact counts can still be slow. Rebuild with `--exhaustive` to include hidden, ignored and generated files, `Library` and `.local`; saved display preferences and explicit exclusions are preserved.
+**New in 0.3.41:** literal special-character search, Unicode smart case, explicit case/whole-word controls, `fe explain`, stricter interrupted-publication recovery, and bounded native tables for tens of millions of results. [Search modes and recovery](docs/SEARCH-0.3.41.md).
 
-[**Get the 0.3.8 preview**](https://github.com/Supersynergy/find-everything/releases/tag/v0.3.8) · [Features](#features) · [Search examples](#one-line-many-ways-to-find-it) · [Build from source](#build-from-source) · [CLI](#cli-quick-start) · [Privacy](#local-data-and-privacy) · [Release notes](docs/release/RELEASE-NOTES.md)
+**From 0.3.40:** resume compaction of saved snapshots and journal changes, retain exact counts across search-process restarts for large indexes, and explicitly index scanned PDFs/images with local OCR. In Settings → Indexes, use **Merge saved changes (resume)** or **Index with local OCR**. Existing journal gaps require an explicit rebuild and remain visible after compaction. [Details and limits](docs/MAINTENANCE-0.3.40.md).
+
+[**Get the 0.3.41 preview**](https://github.com/Supersynergy/find-everything/releases/tag/v0.3.41) · [Features](#features) · [Search examples](#one-line-many-ways-to-find-it) · [Meaning search](docs/INSTANTFIND.md) · [Build from source](#build-from-source) · [CLI](#cli-quick-start) · [Privacy](#local-data-and-privacy) · [Release notes](docs/release/RELEASE-NOTES.md)
 
 > **Apple Silicon preview — not notarized.** The downloadable build is locally signed, not signed with a trusted Developer ID or Apple-notarized. Gatekeeper may refuse it. We do not recommend disabling Gatekeeper, removing quarantine or changing privacy permissions to bypass this. Build from source with your own signing identity, or wait for a notarized release. Intel and older macOS versions have not been verified.
 
@@ -37,7 +39,7 @@ Prepare document text once, then combine `content:"quarterly revenue"` with file
 
 Text/code files use UTF-8; extractable PDFs use the bundled local PDFKit helper, and macOS Office/RTF uses `textutil`. The unbundled CLI fallback requires both `pdftotext` and `pdfinfo`; PDFs are skipped if their page count cannot be verified. Searches read the cache, not source document bodies, and never scan folders for this feature. Preparation is bounded and resumable. Unsupported, changed, unreadable or oversized files remain unknown—not proof of no match. Search replies keep `complete:false`: cached text cannot prove that no current document matches.
 
-**Limits:** no OCR or semantic document search. Text is capped at 2 MiB; PDF/Office inputs at 32 MiB and extracted text at 2 MiB; PDFs at 1,000 pages. Hidden paths are skipped. Cached document text is private but **not encrypted**. Re-run preparation after edits; `fe content clear --index work` clears cached text without deleting originals.
+**Limits:** local OCR is opt-in; meaning search requires separate Instantfind preparation. Text is capped at 2 MiB; PDF/Office inputs at 32 MiB and extracted text at 2 MiB; PDFs at 1,000 pages. Hidden paths are skipped. Cached document text is private but **not encrypted**. Re-run preparation after edits; `fe content clear --index work` clears cached text without deleting originals.
 
 ### Find the right sound—or describe it
 
@@ -129,7 +131,7 @@ Save searches with their folder/project scope, pin favourites, revisit search hi
 </details>
 
 
-**Document contents require explicit preparation.** A normal filename/path query does not search document text; use `content:` for that. No OCR is provided. Semantic search means optional **audio** similarity, not semantic document search. Coverage remains limited by chosen roots, supported formats, exclusions, permissions and preparation.
+**Document contents require explicit preparation.** A normal filename/path query does not search document text; use `content:` for that. Use `fe content index --index work --ocr --ocr-pages 32` for local scanned-document OCR. Optional `meaning:` search uses explicitly prepared document vectors. Coverage remains limited by chosen roots, supported formats, exclusions, permissions and preparation.
 
 ## See the filters, not just the theme
 
@@ -167,7 +169,7 @@ These are rendered production views with fixture progress, not scans of personal
 
 The complete app archive requires **macOS 15 or later on Apple Silicon**; its native helper binaries target macOS 15. It was built and checked on macOS 15.8.2. The source app/CLI target alone is not the compatibility floor of the complete bundle.
 
-The [release page](https://github.com/Supersynergy/find-everything/releases/tag/v0.3.8) contains:
+The [release page](https://github.com/Supersynergy/find-everything/releases/tag/v0.3.41) contains:
 
 - `FindEverything.app.zip`: Apple Silicon app with its bundled CLI and native helpers.
 - `SHA256SUMS.txt`: archive and manifest checksums.

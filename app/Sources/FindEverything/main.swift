@@ -1013,7 +1013,7 @@ final class Model: ObservableObject {
     select(last ? resultCount-1 : 0,trigger:.keyboard)
   }
 
-  func prepareContents(clear: Bool = false) {
+  func prepareContents(clear: Bool = false, ocr: Bool = false) {
     guard !indexing else { return }
     indexing = true; errorMessage = nil; indexProgress = nil
     indexingTarget = scope.label
@@ -1025,7 +1025,7 @@ final class Model: ObservableObject {
         var pending = 0
         for _ in 0..<(clear ? 1 : 10) {
           guard !Task.isCancelled else { return }
-          let args = clear ? ["content", "clear", "--index", index, "--json"] : ["content", "index", "--index", index, "--max-files", "500", "--seconds", "30", "--json"]
+          let args = clear ? ["content", "clear", "--index", index, "--json"] : ["content", "index", "--index", index, "--max-files", "500", "--seconds", "30", "--json"] + (ocr ? ["--ocr", "--ocr-pages", "32"] : [])
           let out = try await runTool(args)
           guard !Task.isCancelled else { return }
           guard let reply = try JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any] else {
@@ -1037,6 +1037,31 @@ final class Model: ObservableObject {
           if pending == 0 { break }
         }
         showToast(clear ? "Cached document text cleared; original files unchanged" : pending == 0 ? "Document index saved; check search coverage" : "Partial document index saved. Run again to continue.")
+        onQueryChange(query, force: true)
+      } catch { if !Task.isCancelled { errorMessage = error.localizedDescription } }
+    }
+  }
+
+  func compactSavedIndex() {
+    guard !indexing else { return }
+    indexing = true; errorMessage = nil; indexProgress = nil
+    let index = scope.rawValue; indexingTarget = scope.label
+    indexingStatus = "Combining saved changes · Stop keeps progress"
+    enrichmentTask = Task {
+      defer { finishIndexing() }
+      do {
+        var pending = true
+        for _ in 0..<10 {
+          guard !Task.isCancelled else { return }
+          let out = try await runTool(["compact", "--index", index, "--rows", "1000000", "--seconds", "30", "--json"])
+          guard let reply = try JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String:Any] else {
+            throw NSError(domain:"fe",code:1,userInfo:[NSLocalizedDescriptionKey:"Invalid compaction response; saved progress is preserved"])
+          }
+          pending = reply["resumable"] as? Bool ?? false
+          indexingStatus = "\(reply["rows"] as? Int ?? 0) saved paths combined · journal gaps remain visible"
+          if !pending { break }
+        }
+        showToast(pending ? "Saved progress retained; run again to continue" : "Saved changes combined; review remaining coverage warnings")
         onQueryChange(query, force: true)
       } catch { if !Task.isCancelled { errorMessage = error.localizedDescription } }
     }
@@ -1902,6 +1927,7 @@ struct SearchView: View {
       ResultColumnsView()
       ResultSortBar()
       ResultFiltersView()
+      if m.resultCount>10_000 {ResultNavigationBar()}
       if let error = m.actionError ?? m.errorMessage ?? m.shortcutWarning {
         HStack {
           Text(error).font(.system(size: 11)).foregroundStyle(.red).lineLimit(3)

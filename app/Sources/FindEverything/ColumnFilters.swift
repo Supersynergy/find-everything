@@ -49,6 +49,13 @@ struct ResultFiltersView: View {
         }
         ColumnFilterRow(column:column).id(column)
         HStack(spacing:16) {
+          Button("Literal text") {m.query="literal:"+SearchQueryOptions.quoted(m.query);m.onQueryChange(m.query)}.disabled(m.query.isEmpty).help("Search the entire current text literally, including punctuation and operators")
+          Picker("Case",selection:Binding(get:{SearchQueryOptions.value("case",in:m.query) ?? "smart"},set:{m.setQueryOption("case",$0)})) {
+            Text("Smart").tag("smart");Text("Match").tag("yes");Text("Ignore").tag("no")
+          }.frame(width:155)
+          Toggle("Whole words",isOn:Binding(get:{SearchQueryOptions.value("word",in:m.query)=="yes"},set:{m.setQueryOption("word",$0 ? "yes" : nil)}))
+        }.font(.caption)
+        HStack(spacing:16) {
           Toggle("Favorites only",isOn:Binding(get:{SearchQueryOptions.value("favorites",in:m.query)=="true"},set:{m.setQueryOption("favorites",$0 ? "true" : nil)}))
           Toggle("All indexed files",isOn:Binding(get:{SearchQueryOptions.value("view",in:m.query)=="all"},set:{m.setQueryOption("view",$0 ? "all" : nil)})).help("Override visibility preferences for this query")
           Spacer(minLength:0)
@@ -119,4 +126,26 @@ struct ColumnFilterRow: View {
     m.setQueryOption(customKey,column == .name || column == .path ? SearchQueryOptions.quoted(value) : value)
     editing=false
   }
+}
+
+
+struct ResultNavigationBar:View {
+  @EnvironmentObject var m:Model
+  @State private var target=""
+  @FocusState private var editing:Bool
+  var body:some View {
+    HStack(spacing:8) {
+      Button("First") {m.jumpBoundary(last:false)}
+      Button("Previous 10,000") {m.select(m.selected-10_000,trigger:.keyboard)}
+      Text("\(m.selected+1) / \(m.resultCount)").monospacedDigit()
+      Button("Next 10,000") {m.select(m.selected+10_000,trigger:.keyboard)}
+      Button("Last") {m.jumpBoundary(last:true)}
+      Spacer(minLength:0)
+      TextField("Go to result",text:$target).frame(width:95).focused($editing).onSubmit {jump()}.accessibilityLabel("Go to result number")
+      Button("Go") {jump()}.disabled(Int(target)==nil)
+    }.font(.system(size:11)).padding(.horizontal,14).padding(.vertical,5)
+      .onChange(of:editing) {m.editingColumnFilter=$0}
+      .onDisappear {m.editingColumnFilter=false}
+  }
+  private func jump() {if let number=Int(target),number>0 {m.select(number-1,trigger:.keyboard);editing=false}}
 }

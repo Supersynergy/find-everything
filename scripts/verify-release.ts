@@ -18,7 +18,7 @@ function check(ok: unknown, message: string): asserts ok { if (!ok) throw new Er
 
 const version = (JSON.parse(read("package.json")) as { version: string }).version;
 const manifest = JSON.parse(read("release-artifacts/release.json")) as Manifest;
-check(version === '0.3.8' && manifest.version === version && manifest.tag === `v${version}`, "Version/tag mismatch");
+check(version === '0.3.41' && manifest.version === version && manifest.tag === `v${version}`, "Version/tag mismatch");
 check(manifest.preview === true && manifest.notarized === false && manifest.architecture === "arm64", "Preview must not claim notarized, stable or universal distribution");
 check(read("src/services.ts").includes(`export const VERSION = "${version}"`), "CLI source version mismatch");
 check(read("app/bundle-app.sh").split(`<string>${version}</string>`).length === 3, "Native bundle version mismatch");
@@ -28,7 +28,7 @@ check(read("README.md").includes("first app launch") && read("README.md").includ
 const productImages=['hero.png','native-light.png','native-dark.png','native-missing-index.png','native-filters.png','indexing-scan.png','indexing-progress.png','indexing-paused.png','indexing-narrow.png'];
 check(manifest.assets.length === 1 && manifest.assets[0].name === "FindEverything.app.zip", "Unexpected archive set");
 check(Array.isArray(manifest.codeFiles) && manifest.codeFiles.includes("src/engine.ts") && manifest.codeFiles.includes("app/Sources/FindEverything/main.swift"), "Build source inventory missing");
-check(manifest.codeFiles.every(path => !path.split("/").includes("..") && /^(src\/|app\/(Sources\/|MediaProbe\.swift$|FileEvents\.swift$|ContentProbe\.swift$|Package\.swift$|bundle-app\.sh$)|package\.json$)/.test(path)), "Invalid build source inventory");
+check(manifest.codeFiles.every(path => !path.split("/").includes("..") && /^(src\/|runtime\/instantfind\/[a-z_]+\.py$|app\/(Sources\/|MediaProbe\.swift$|FileEvents\.swift$|ContentProbe\.swift$|Package\.swift$|bundle-app\.sh$)|package\.json$)/.test(path)), "Invalid build source inventory");
 for (const asset of manifest.assets) {
   check(/^[A-Za-z0-9._-]+$/.test(asset.name), "Unsafe asset path");
   const path = join(artifactDir, asset.name);
@@ -48,6 +48,7 @@ const entries = run("/usr/bin/unzip", ["-Z1", join(artifactDir, "FindEverything.
 check(entries.every(path => !path.startsWith("/") && !path.split("/").includes("..")), "Archive path traversal");
 for (const file of ["LICENSE", "THIRD-PARTY-NOTICES.md", "BUN-LICENSE.md"]) check(entries.includes(`Find Everything.app/Contents/Resources/Licenses/${file}`), `Archive lacks ${file}`);
 check(!entries.some(path => /\/(?:model|node_modules|backups)\//.test(path) || /\/\.env(?:\.|$)/.test(path)), "Private/optional payload must not ship");
+for(const name of ['worker.py','compact_tokenizer.py'])check(entries.includes(`Find Everything.app/Contents/Resources/instantfind/${name}`),`Archive lacks Instantfind source helper ${name}`);
 for (const image of productImages) {
   const png = readFileSync(join(root, "docs/release/images", image));
   check(png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), `Invalid PNG: ${image}`);

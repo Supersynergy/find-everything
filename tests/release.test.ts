@@ -24,7 +24,7 @@ describe("release contract", () => {
 
   test("package, CLI and native bundle agree on the version", () => {
     const version: string = JSON.parse(text("package.json")).version;
-    assert.equal(version, "0.3.8");
+    assert.equal(version, "0.3.41");
     assert.ok(text("src/services.ts").includes(`export const VERSION = "${version}"`));
     assert.equal(text("app/bundle-app.sh").match(new RegExp(`<string>${version.replaceAll(".", "\\.")}</string>`, "g"))?.length, 2);
     assert.ok(text("app/bundle-app.sh").includes('<key>LSMinimumSystemVersion</key><string>15.0</string>'));

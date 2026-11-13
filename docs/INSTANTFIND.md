@@ -29,7 +29,7 @@ den gepinnten Export per SHA-256 und kopiert ihn in den privaten App-Support-Ord
 Die Modellgewichte unterliegen der Gemma-Lizenz und sind nicht im App-Bundle enthalten.
 
 Die Textvorbereitung verwendet den bestehenden begrenzten Extraktor. Unterstützt
-werden Text-/Projektdateien, extrahierbare PDFs und unter macOS Office/RTF. Kein OCR.
+werden Text-/Projektdateien, PDFs und unter macOS Office/RTF. Mit `fe content index --ocr` werden auch gescannte PDFs und Bilder lokal erkannt; danach den Bedeutungsindex ausdrücklich aktualisieren.
 Ein Budgetende liefert `pending:true`; derselbe Befehl setzt den Aufbau fort.
 Ein vollständiger alter Vektorindex bleibt bis zum fertigen Austausch erhalten.
 Die semantischen Abschnitte bleiben begrenzt; die zusätzliche Wortsuche erfasst
@@ -144,7 +144,6 @@ Zwei frühere Kandidaten wurden wegen unzureichender Qualität verworfen.
 Rohdaten, eingefrorene Aufgaben, Quellen-Hashes und Grenzen stehen unter
 `/Users/master/BASE/data/fe-instantfind-quality-20261113/REPORT.md`.
 
-Die Änderungen liegen im Branch `feat/instantfind`. Eine parallel installierte
-0.3.41-Arbeitsversion wurde beim abschließenden Abgleich erhalten; diese neue
-Qualitätsänderung ist dort noch nicht integriert. Das signierte Preview-Bundle
-und der isolierte Diensttest sind im Messbericht verlinkt.
+Die Änderungen liegen im Branch `feat/instantfind`, zusammengeführt mit 0.3.41.
+Der Messbericht unterscheidet den ursprünglichen Blindtest von der anschließenden
+Integrationskontrolle.

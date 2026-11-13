@@ -10,6 +10,7 @@ import { once } from "events";
 import { acquireLock, BUILTIN_SCOPES, IndexOptions, profile, profiles, validateName } from "./catalog";
 import { MEDIA_FIELDS, NumericFilter, normalizeQuery, numericFilters } from "./smart-query";
 import { deltaFor } from "./delta";
+import {recoverPublishedCompaction} from './compaction-recovery';
 
 export const HOME = os.homedir();
 export const IS_MAC = process.platform === "darwin";
@@ -263,6 +264,7 @@ export async function shardIndex(file: string, dir: string): Promise<void> {
 export function rebuildIndex(scope: Scope, opts: EngineOpts, monitor?: { progress: (stats: { count: number; bytes: number }) => void; signal: AbortSignal; externalTimeout: boolean }): Promise<void> {
   opts = effectiveOptions(scope, opts);
   const file = indexPathFor(scope);
+  recoverPublishedCompaction(file);
   const pending = inFlight.get(file);
   if (pending) return pending;
 
@@ -415,6 +417,8 @@ function searchTarget(scope: Scope): { target: string; isDir: boolean } {
 // `sort:name|new|old|big|small` result ordering, `size:>10m` / `dm:today`
 // Indexed filters run before pagination. Unconsumed words stay fuzzy terms.
 export interface ParsedQuery {
+  matchCase?: boolean;
+  wholeWord?: boolean;
   smart?: boolean;
   learning?: boolean;
   learned?: {path:string;boost:number}[];
@@ -455,6 +459,7 @@ const DM_DAYS: Record<string, number> = {
   month: 31, thismonth: 31, year: 366, thisyear: 366,
 };
 export function parseQuery(q: string): ParsedQuery {
+  if(q.includes('\0'))throw new Error('NUL is not valid in a filename or query');
   q = normalizeQuery(q).normalize('NFC');
   const pq: ParsedQuery = { fuzzy: [], constraints: [], mediaFilters: [] };
   q = q.replace(/sound:("(?:\\.|[^"\\\n])+")/g, (_, encoded) => {
@@ -467,7 +472,7 @@ export function parseQuery(q: string): ParsedQuery {
   if(q.replace(/(?:[^\s"]|"(?:\\.|[^"\\])*")+/g,'').trim())throw new Error('Unclosed quoted value');
   const unquote = (s:string) => {
     if (!s.startsWith('"')) return s;
-    try {const value=JSON.parse(s);if(typeof value==='string')return value;} catch {throw new Error('Invalid quoted value');}
+    try {const value=JSON.parse(s);if(typeof value==='string'&&!value.includes('\0'))return value;} catch {throw new Error('Invalid quoted value');}
     throw new Error('Invalid quoted value');
   };
   if (toks.length + pq.fuzzy.length > 32) throw new Error("Use at most 32 search terms or filters");
@@ -477,7 +482,7 @@ export function parseQuery(q: string): ParsedQuery {
       return `/${IN_ALIASES[lv]}/`;
     if (v.startsWith("/") || v.startsWith("~"))
       return (v.startsWith("~") ? HOME + v.slice(1) : v).replace(/\/+$/,'')+'/';
-    return `/${lv}/`;
+    return `/${v}/`;
   };
   for (let i = 0; i < toks.length; i++) {
     const tok = toks[i];
@@ -501,6 +506,17 @@ export function parseQuery(q: string): ParsedQuery {
       const k = m[1].toLowerCase();
       const v = unquote(m[2]);
       const lv = v.toLowerCase();
+      if(k==='literal'){
+        if(!v.length||Buffer.byteLength(v)>4096)throw new Error('literal: needs 1–4096 UTF-8 bytes');
+        pq.constraints.push({pattern:reEsc(v),literal:v,negate:false});continue;
+      }
+      if(k==='case'||k==='word'){
+        if(k==='case'&&lv==='smart'){pq.matchCase=undefined;continue;}
+        if(!['yes','true','1','no','false','0'].includes(lv))throw new Error(`${k}: use yes or no${k==='case'?' or smart':''}`);
+        const enabled=['yes','true','1'].includes(lv);
+        if(k==='case')pq.matchCase=enabled;else pq.wholeWord=enabled;
+        continue;
+      }
       if(k==='meaning') {
         if(pq.meaning!==undefined)throw new Error('Use one meaning: description per query');
         if(!v.trim()||Buffer.byteLength(v)>2048||!/[\p{L}\p{N}]/u.test(v)||/[\r\n\0]/.test(v))throw new Error('meaning: requires a document description of at most 2048 UTF-8 bytes');

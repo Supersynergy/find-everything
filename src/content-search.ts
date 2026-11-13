@@ -16,6 +16,9 @@ const PDF_PAGE_LIMIT=1000;
 const MATCH_LIMIT=100000;
 const TEXT_EXTENSIONS=new Set('txt md mdx markdown rst org csv tsv json jsonl ndjson yaml yml toml ini xml html htm tex log ts tsx js jsx mjs cjs py rs go swift sh bash zsh fish rb java c h cpp cc hpp css scss sql vue svelte'.split(' '));
 const OFFICE_EXTENSIONS=new Set(['rtf','doc','docx','odt','wordml']);
+const IMAGE_EXTENSIONS=new Set(['png','jpg','jpeg','tif','tiff','heic','bmp','webp']);
+export type ContentOptions={ocr?:boolean;maxPages?:number};
+type ExtractionEvidence={method:string;pages:{page:number;method:string;confidence?:number}[];version:number};
 const REMEDY='Run fe content index --index NAME explicitly; search never reads source document bodies or scans folders.';
 type ContentQuery=ParsedQuery & {content?:string};
 type FileRow={path:string;size:number;mtime:number;ctime:number;ino:number;device:number;status:string;seen:string};
@@ -37,6 +40,7 @@ function openCache(index:string,readonly=false):Database {
     CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY,size INTEGER,mtime REAL,ctime REAL,ino INTEGER,device INTEGER,status TEXT,seen TEXT);
     CREATE INDEX IF NOT EXISTS content_seen ON files(seen,status);
+    CREATE TABLE IF NOT EXISTS extraction(path TEXT PRIMARY KEY,details TEXT NOT NULL);
     CREATE VIRTUAL TABLE IF NOT EXISTS bodies USING fts5(path UNINDEXED,body,tokenize='unicode61 remove_diacritics 2');`);
   return db;
 }
@@ -66,9 +70,9 @@ async function converted(bytes:Buffer,command:string,args:string[],timeout:numbe
     child.stdin?.end(bytes);
   });
 }
-async function extract(file:string,deadline:number,signal?:AbortSignal):Promise<{status:string;text:string;stat?:fs.Stats}> {
+async function extract(file:string,deadline:number,signal?:AbortSignal,options:ContentOptions={}):Promise<{status:string;text:string;stat?:fs.Stats;evidence?:ExtractionEvidence}> {
   const ext=path.extname(file).slice(1).toLowerCase();
-  const supported=TEXT_EXTENSIONS.has(ext)||ext==='pdf'||OFFICE_EXTENSIONS.has(ext);
+  const supported=TEXT_EXTENSIONS.has(ext)||ext==='pdf'||OFFICE_EXTENSIONS.has(ext)||options.ocr&&IMAGE_EXTENSIONS.has(ext);
   const stat=fs.lstatSync(file);
   if(!stat.isFile()||stat.isSymbolicLink()||!supported||/(?:^|\/)\.[^/]/.test(file))return {status:'unsupported',text:'',stat};
   if(stat.size>(TEXT_EXTENSIONS.has(ext)?TEXT_LIMIT:DOCUMENT_LIMIT))return {status:'too-large',text:'',stat};
@@ -83,13 +87,19 @@ async function extract(file:string,deadline:number,signal?:AbortSignal):Promise<
     bytes=bytes.subarray(0,length);
   } finally {fs.closeSync(fd);}
   signal?.throwIfAborted();
-  let text:string;
+  let text:string,evidence:ExtractionEvidence={method:TEXT_EXTENSIONS.has(ext)?'utf8':ext==='pdf'?'pdf-text':'office-text',pages:[],version:1};
   if(TEXT_EXTENSIONS.has(ext)) {
     try {text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);} catch {return {status:'unsupported-encoding',text:'',stat};}
     if(/[\u0000-\u0008\u000b\u000e-\u001f]/.test(text))return {status:'binary',text:'',stat};
   } else {
-    const timeout=Math.max(1,Math.min(5000,Math.floor(deadline-performance.now())));
-    if(ext==='pdf') {
+    const timeout=Math.max(1,Math.min(options.ocr?30000:5000,Math.floor(deadline-performance.now())));
+    if(options.ocr&&(ext==='pdf'||IMAGE_EXTENSIONS.has(ext))){
+      const helper=process.env.FE_CONTENT_HELPER??[path.join(path.dirname(fs.realpathSync(process.execPath)),'fe-content-probe'),path.resolve(__dirname,'../app/.build/fe-content-probe')].find(p=>fs.existsSync(p));
+      if(!helper)return {status:'ocr-unavailable',text:'',stat};
+      const result=JSON.parse(await converted(bytes,helper,['--ocr-json','--max-pages',String(options.maxPages??32)],timeout,signal));
+      if(result.version!==1||typeof result.text!=='string'||!Array.isArray(result.pages)||!result.pages.length||result.pages.length>(options.maxPages??32)||result.pages.some((p:any,i:number)=>p.page!==i+1||!['ocr','embedded+ocr'].includes(p.method)))throw new Error('Invalid OCR evidence');
+      text=result.text;evidence={method:'vision-ocr',pages:result.pages,version:1};
+    }else if(ext==='pdf') {
       const helper=process.env.FE_CONTENT_HELPER??[path.join(path.dirname(fs.realpathSync(process.execPath)),'fe-content-probe'),path.resolve(__dirname,'../app/.build/fe-content-probe')].find(p=>fs.existsSync(p));
       if(helper)text=await converted(bytes,helper,[],timeout,signal);
       else {
@@ -117,7 +127,7 @@ async function extract(file:string,deadline:number,signal?:AbortSignal):Promise<
   }
   const current=fs.lstatSync(file);
   if(!sameFile({path:file,size:stat.size,mtime:stat.mtimeMs,ctime:stat.ctimeMs,ino:stat.ino,device:stat.dev,status:'',seen:''},current))return {status:'changed',text:'',stat};
-  return {status:'ok',text,stat};
+  return {status:'ok',text,stat,evidence};
 }
 
 export function contentStatus(index:string) {
@@ -159,8 +169,9 @@ export function matchesCachedContent(row:CachedContentRecord,pq:ParsedQuery):boo
   try {return sameFile(row,fs.lstatSync(row.path));}catch{return false;}
 }
 
-export async function indexContents(index:string,maxFiles=500,seconds=60,signal?:AbortSignal) {
+export async function indexContents(index:string,maxFiles=500,seconds=60,signal?:AbortSignal,options:ContentOptions={}) {
   if(!Number.isInteger(maxFiles)||maxFiles<1||maxFiles>10000||!Number.isFinite(seconds)||seconds<=0||seconds>300)throw new Error('Content indexing requires 1–10000 files and at most 300 seconds');
+  if(options.maxPages!==undefined&&(!Number.isInteger(options.maxPages)||options.maxPages<1||options.maxPages>100))throw new Error('OCR requires 1–100 pages per document');
   signal?.throwIfAborted();
   const source=sourceState(index); // An existing path snapshot is mandatory. No implicit index or walk.
   fs.mkdirSync(INDEX_DIR,{recursive:true,mode:0o700});
@@ -179,20 +190,24 @@ export async function indexContents(index:string,maxFiles=500,seconds=60,signal?
       const cached=store.query('SELECT * FROM files WHERE path=?').get(file) as FileRow|null;
       try {
         const stat=fs.lstatSync(file);
-        if(cached?.status==='ok'&&sameFile(cached,stat)) {
+        const prior=store.query('SELECT details FROM extraction WHERE path=?').get(file) as {details:string}|null;
+        const wantsOCR=options.ocr&&(path.extname(file).toLowerCase()==='.pdf'||IMAGE_EXTENSIONS.has(path.extname(file).slice(1).toLowerCase()));
+        if(cached?.status==='ok'&&sameFile(cached,stat)&&(!wantsOCR||prior&&JSON.parse(prior.details).method==='vision-ocr')) {
           reused++;if(cached.seen!==source.stamp)transaction(store,()=>{store.query('UPDATE files SET seen=? WHERE path=?').run(source.stamp,file);checkpoint();});return;
         }
       } catch(error) {if(!['ENOENT','EACCES','EPERM'].includes(errorCode(error)))throw error;}
       processed++;
-      let result:{status:string;text:string;stat?:fs.Stats};
-      try {result=await extract(file,deadline,signal);}
+      let result:{status:string;text:string;stat?:fs.Stats;evidence?:ExtractionEvidence};
+      try {result=await extract(file,deadline,signal,options);}
       catch(error) {signal?.throwIfAborted();result={status:errorCode(error)==='ENOENT'?'missing':'unreadable-or-extractor-failed',text:''};}
       if(result.status!=='ok')skipped++;
       transaction(store,()=>{
         const stat=result.stat;
         store.query('DELETE FROM bodies WHERE path=?').run(file);
+        store.query('DELETE FROM extraction WHERE path=?').run(file);
         store.query('INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?)').run(file,stat?.size??0,stat?.mtimeMs??0,stat?.ctimeMs??0,stat?.ino??0,stat?.dev??0,result.status,source.stamp);
         if(result.status==='ok')store.query('INSERT INTO bodies(path,body) VALUES (?,?)').run(file,result.text);
+        if(result.evidence)store.query('INSERT INTO extraction VALUES (?,?)').run(file,JSON.stringify(result.evidence));
         checkpoint();
       });
     };
@@ -219,6 +234,7 @@ export async function indexContents(index:string,maxFiles=500,seconds=60,signal?
       if(done) {
         store.query('DELETE FROM bodies WHERE path IN (SELECT path FROM files WHERE seen<>?)').run(source.stamp);
         store.query('DELETE FROM files WHERE seen<>?').run(source.stamp);
+        store.exec('DELETE FROM extraction WHERE path NOT IN (SELECT path FROM files)');
       }
     });
     const status=contentStatus(index);
@@ -262,10 +278,12 @@ export async function searchContents(index:string,pq:ContentQuery,limit=300,offs
     else if(pq.smart||pq.sort==='relevance')matches.sort((a,b)=>relevanceScore(a.path,pq)-relevanceScore(b.path,pq)||a.rank-b.rank||compareSearchProperties(a,b,'name'));
     const selected=matches.slice(offset,offset+limit),traversed=getMeta(db,'complete')==='1';
     if(sourceState(index).stamp!==source.stamp)return empty('Path snapshot changed during document search. '+REMEDY);
-    const warnings=['Cached document text only; refresh contents after edits. No OCR; hidden, binary, unsupported and oversized files are excluded. PDF text uses the bundled helper or pdftotext fallback; Office/RTF requires macOS. Cached text is not exhaustive proof of current filesystem contents.'];
+    const warnings=['Cached document text only; refresh contents after edits. OCR is opt-in with fe content index --ocr. Hidden, binary, unsupported and oversized files are excluded. OCR and extracted text may contain errors; cached text is not exhaustive proof of current filesystem contents.'];
+    const hasEvidence=!!db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='extraction'").get();
+    const extraction=hasEvidence?selected.map(row=>{const value=db.query('SELECT details FROM extraction WHERE path=?').get(row.path) as {details:string}|null;return {path:row.path,...(value?JSON.parse(value.details):{method:'legacy-unrecorded'})};}):[];
     if(unknown||invalid||!traversed||bounded)warnings.push(`Content coverage: ${unknown} skipped/unreadable, ${invalid} changed/missing matches${!traversed?', preparation unfinished':''}${bounded?', first 100000 FTS matches only':''}. ${REMEDY}`);
     return {paths:selected.map(r=>r.path),snippets:selected.map(r=>({path:r.path,text:r.text})),properties:selected.map(r=>({path:r.path,size:r.size,mtime:r.mtime,dir:0})),
-      complete:false,warnings,coverage:{cachedSnapshotComplete:!unknown&&!invalid&&traversed&&!bounded,matched:bounded?null:matches.length,indexed:(db.query("SELECT count(*) AS n FROM files WHERE seen=? AND status='ok'").get(source.stamp) as {n:number}).n,unknown,limited:bounded},
+      complete:false,warnings,extraction,coverage:{cachedSnapshotComplete:!unknown&&!invalid&&traversed&&!bounded,matched:bounded?null:matches.length,indexed:(db.query("SELECT count(*) AS n FROM files WHERE seen=? AND status='ok'").get(source.stamp) as {n:number}).n,unknown,limited:bounded},
       offset,nextOffset:offset+selected.length<matches.length?offset+selected.length:null,snapshotId:`${source.stamp}:content:${getMeta(db,'revision')}`,snapshot:true,content:true};
   } finally {db.exec('ROLLBACK');db.close();}
 }
@@ -276,7 +294,7 @@ export async function clearContents(index:string) {
   let db:Database|undefined;
   try {
     db=openCache(index);const store=db;
-    transaction(store,()=>{store.exec('DELETE FROM bodies; DELETE FROM files; DELETE FROM meta;');});
+    transaction(store,()=>{store.exec('DELETE FROM bodies; DELETE FROM files; DELETE FROM extraction; DELETE FROM meta;');});
     store.exec('VACUUM');return {cleared:true,indexed:0};
   } finally {db?.close();release();}
 }

@@ -10,6 +10,7 @@ import { scanExcludes, FD, HOME, INDEX_DIR, effectiveOptions, indexStatus, track
 import { baseStamp, openLive, livePath, LIVE_PATH_LIMIT } from "./delta";
 import { repairMedia, mediaPath } from "./media";
 import { refreshSounds } from "./semantic";
+import {recoverPublishedCompaction} from './compaction-recovery';
 const exec = promisify(execFile);
 const under = (p: string, root: string) => p === root || p.startsWith(root.endsWith("/") ? root : root + "/");
 function excluded(p:string,root:string,patterns:string[]) {
@@ -134,6 +135,9 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
             const relative = path.relative(scope.paths.find(r => under(p,r))!,p);
             const exclusions = scanExcludes(scope.name,scope.options);
             if ((!scope.options.includeHidden&&relative.split(path.sep).some(part=>part.startsWith('.'))) || excluded(p,scope.paths.find(r=>under(p,r))!,exclusions)) continue;
+            // Own count-cache metadata must not invalidate the snapshot that keyed it.
+            // Creation/removal/rename still index these filenames; no user path is hidden.
+            if(path.dirname(p)===INDEX_DIR&&/^counts-[a-zA-Z0-9_-]+\.sqlite(?:-journal)?$/.test(path.basename(p))&&!(flags&(256|512|2048)))continue;
             if ([".gitignore",".ignore",".fdignore"].includes(path.basename(p))) {
               if (scope.options.includeIgnored) continue;
               const baseline = scope.scanStartedAt ? Date.parse(scope.scanStartedAt) : Date.parse(scope.indexedAt || "")-120000;
@@ -207,15 +211,21 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
     scopeList = indexStatus().filter(s => s.exists && (!names || names.includes(s.name)));
     const roots = [...new Set(scopeList.flatMap(s => s.paths))];
     if (roots.length > 64) throw new Error("At most 64 independent live roots supported");
-    db.transaction(() => { for (const s of scopeList) {
-      const stamp = baseStamp(s.name), old = db.query("SELECT stamp FROM scopes WHERE name=?").get(s.name);
+    for(const s of scopeList)recoverPublishedCompaction(path.join(INDEX_DIR,`index-${s.name}.txt`));
+    // Take the journal write lock before reading filesystem stamps. A publisher
+    // holds the same lock while swapping files, so reconfiguration cannot erase
+    // post-watermark events using an earlier observation of the path snapshot.
+    db.exec('BEGIN IMMEDIATE');
+    try { for (const s of scopeList) {
+      const stat=fs.statSync(path.join(INDEX_DIR,`index-${s.name}.txt`));
+      const stamp = `${stat.mtimeMs}:${stat.size}`, old = db.query("SELECT stamp FROM scopes WHERE name=?").get(s.name);
       if (old?.stamp !== stamp) {
         db.query("DELETE FROM changes WHERE scope=?").run(s.name); db.query("DELETE FROM jobs WHERE scope=?").run(s.name);
         for (const root of s.paths) db.query("DELETE FROM streams WHERE root=?").run(root);
       }
       db.query("INSERT INTO scopes(name,stamp,pid) VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET stamp=excluded.stamp,pid=excluded.pid,problem=CASE WHEN stamp<>excluded.stamp THEN NULL ELSE problem END").run(s.name,stamp,process.pid);
       if (s.options.includeIgnored) db.query("UPDATE scopes SET problem=NULL WHERE name=? AND problem='Ignore rules changed; explicit reconciliation required'").run(s.name);
-    } })();
+    } db.exec('COMMIT'); }catch(error){if(db.inTransaction)db.exec('ROLLBACK');throw error;}
     if (!roots.length) return;
     const config = roots.map(root => {
       const old = db.query("SELECT uuid,cursor FROM streams WHERE root=?").get(root);

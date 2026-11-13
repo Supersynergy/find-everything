@@ -1,6 +1,7 @@
 import {spawn,ChildProcess} from 'node:child_process';
 import path from 'node:path';
 import {track} from './engine';
+import {preparedFileStamp} from './search-cache';
 declare const Bun:{main:string};
 
 export const searchCanceled=()=>Object.assign(new Error('Search superseded or canceled'),{status:409,code:'SEARCH_CANCELED'});
@@ -11,7 +12,7 @@ export type SearchWork={query:string;index:string;limit:number;offset:number;cli
 type Caller={work:SearchWork;resolve:(data:any)=>void;reject:(error:Error)=>void;cleanup:()=>void};
 type Job={id:number;work:SearchWork;key?:string;callers:Set<Caller>;cleanup:()=>void};
 
-/** One reusable, disposable reader. Live index writes stay in the service. */
+/** One reusable, disposable reader; it synchronizes its accelerator before reading. */
 export class SearchProcess {
  private child?:ChildProcess;
  private stopping?:Promise<void>;
@@ -113,6 +114,7 @@ export class SearchProcess {
     try {
      const reply=JSON.parse(line),job=this.active;
      if(!job||reply.id!==job.id)throw new Error('Invalid search worker response');
+     if(reply.data&&typeof reply.preparedStamp==='string')Object.defineProperty(reply.data,preparedFileStamp,{value:reply.preparedStamp});
      this.active=undefined;
      if(!reply.error&&reply.data?.instantfind&&reply.data?.runtime?.pid)this.residentMeaning=true;
      this.finish(job,reply.error?new Error(reply.error):undefined,reply.data);this.completed++;

@@ -1,3 +1,6 @@
+/** Internal read identity, carried outside JSON response bodies. */
+export const preparedFileStamp=Symbol('preparedFileStamp');
+
 /** Byte-bounded LRU for immutable search response bodies. Live health is added later. */
 export class SearchCache<T> {
   private entries = new Map<string, { at: number; data: T; bytes: number }>();

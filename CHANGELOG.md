@@ -4,6 +4,25 @@
 
 - Refine document ranking with up to twelve query-selected late passages from the full-text cache. Keep snippets in SQLite until requested; preserve hard filters and original cosine scores. Split the pinned model graph from its token table and map only requested rows to reduce search memory without changing model vectors. Passage refinement adds query latency.
 
+
+## 0.3.41 — 2026-11-13
+
+- Add literal punctuation queries, Unicode smart case, explicit case and whole-word controls, native filter controls and read-only query explanations. Preserve quoted type-like text instead of rewriting it.
+- Validate compaction source, stage and backup identities before publication, and reject damaged checkpoints or unknown subcommands without replacing saved files.
+- Bound native AppKit tables to a moving 10,000-row window, retaining global selection, scrolling and direct navigation across tens of millions of results.
+
+## 0.3.40 — 2026-11-13
+
+- Add resumable compaction from a pinned prepared snapshot, preserving changes after its journal watermark, CR/LF paths, coverage warnings and previous files. Recover interrupted publication before using the snapshot. Keep real journal gaps until explicit reconciliation.
+- Persist up to 128 exact count results for scopes with at least 100,000 paths in a bounded private SQLite cache. Bind entries to physical and logical snapshot identity; first-time counts still run the exhaustive query. Reuse them across reader/process restarts without changing ordering or filters.
+- Add explicit local Vision OCR for scanned PDFs and images, page/method/confidence provenance, per-file page limits, changed-file validation and a native Settings action. Keep OCR out of the search path and retain existing Instantfind support.
+
+## 0.3.9 — 2026-11-13
+
+- Move live event handling and metadata work into one owned worker process so those batches do not run on the API event loop. Reuse the existing process-group guardian to stop the worker and its helpers when the owning service exits.
+- Synchronize prepared search snapshots inside the disposable search reader. Bind cached responses to the returned snapshot while preserving non-snapshot query dependencies. Mark responses behind the journal as pending, and retain journal-gap warnings.
+- Recover a hot SQLite rollback journal before opening read-only lookup handles after an interrupted search writer. Add crash, ownership, pending-state and live replay regressions.
+
 - Reduce Instantfind memory with a bounded SQLite BPE tokenizer while retaining the pinned model and existing vectors. Process document embeddings sequentially to bound indexing memory. Keep a successfully used document model in the app-owned reader across idle periods; plain readers still retire. Add a frozen real-file DE/EN comparison.
 
 - Add optional `meaning:"…"` retrieval for explicitly prepared document and project-text caches, using a pinned local Gemma model. Keep filename, literal-content and audio search separate.
