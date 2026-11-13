@@ -20,5 +20,6 @@ The app bundle includes the project licence, this notice and Bun's inventory und
 - **fd, ripgrep and fzf:** install separately with a package manager you trust. The app does not download or redistribute their executable archives.
 - **Semantic audio runtime and models:** optional checkout-based setup, not included in the app archive. Model-conversion provenance and all applicable licence/notice material must be checked before redistributing weights. Do not treat a base-model licence as proof for an independent conversion.
 - **Raycast:** optional integration source. Raycast itself is not included.
+- **Document meaning model and Python environment:** optional local setup, supplied separately. Gemma model weights, Python, NumPy and ONNX Runtime are not included in the archive; their upstream terms apply. The archive contains only the project's Instantfind Python helper source. See [local setup and limits](docs/INSTANTFIND.md).
 
 Find Everything's Swift helpers are project source, not copies of the optional tools above. Apple frameworks are supplied by macOS rather than redistributed in this archive.

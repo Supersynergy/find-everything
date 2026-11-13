@@ -420,6 +420,7 @@ export interface ParsedQuery {
   learned?: {path:string;boost:number}[];
   semantic?: string;
   content?: string;
+  meaning?: string;
   mediaFilters: NumericFilter[];
   fuzzy: string[]; // fzf filter terms ('exact, a|b, plain)
   constraints: { pattern: string; negate: boolean; literal?:string; field?:'name'|'folder'; prefix?:boolean; suffixes?:string[]; alternatives?:string[] }[];
@@ -494,12 +495,17 @@ export function parseQuery(q: string): ParsedQuery {
       pq.constraints.push({ pattern: `\\.${tok.slice(2)}\\/?$`,suffixes:['.'+tok.slice(2).toLowerCase()], negate: false });
       continue;
     }
-    if(/^content:$/i.test(tok))throw new Error('content: requires a literal word or quoted phrase');
+    if(/^(content|meaning):$/i.test(tok))throw new Error('content: and meaning: require a word or quoted phrase');
     const m = tok.match(/^([a-z]+):(.+)$/i);
     if (m) {
       const k = m[1].toLowerCase();
       const v = unquote(m[2]);
       const lv = v.toLowerCase();
+      if(k==='meaning') {
+        if(pq.meaning!==undefined)throw new Error('Use one meaning: description per query');
+        if(!v.trim()||Buffer.byteLength(v)>2048||!/[\p{L}\p{N}]/u.test(v)||/[\r\n\0]/.test(v))throw new Error('meaning: requires a document description of at most 2048 UTF-8 bytes');
+        pq.meaning=v.trim();continue;
+      }
       if(k==='content') {
         if(pq.content!==undefined)throw new Error('Use one content: word or quoted phrase per query');
         if(!v.trim()||Buffer.byteLength(v)>512||!/[\p{L}\p{N}]/u.test(v)||/[\r\n\0]/.test(v))throw new Error('content: requires a literal word or phrase, at most 512 UTF-8 bytes');
