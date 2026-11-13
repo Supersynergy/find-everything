@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Refine document ranking with up to twelve query-selected late passages from the full-text cache. Keep snippets in SQLite until requested; preserve hard filters and original cosine scores. Split the pinned model graph from its token table and map only requested rows to reduce search memory without changing model vectors. Passage refinement adds query latency.
+
 - Reduce Instantfind memory with a bounded SQLite BPE tokenizer while retaining the pinned model and existing vectors. Process document embeddings sequentially to bound indexing memory. Keep a successfully used document model in the app-owned reader across idle periods; plain readers still retire. Add a frozen real-file DE/EN comparison.
 
 - Add optional `meaning:"…"` retrieval for explicitly prepared document and project-text caches, using a pinned local Gemma model. Keep filename, literal-content and audio search separate.

@@ -11,9 +11,9 @@ const FILES:Record<string,string>={
   'tokenizer.json':'4dda02faaf32bc91031dc8c88457ac272b00c1016cc679757d1c441b248b9c47',
   'onnx/model_q4.onnx':'ad1dfee81a70f7944b9b9d1cc6e48075b832881cf33fab2f2b248be78f3f0043',
   'onnx/model_q4.onnx_data':'599962c3143b040de2dd05e5975be3e9091dd067cacc6a8f7186e3203bab9e02'};
-interface Configuration {modelId:string;model:string;python:string;files:Record<string,number>;tokenizerBytes?:number}
+interface Configuration {modelId:string;model:string;python:string;files:Record<string,number>;tokenizerBytes?:number;coreBytes?:number;coreDataBytes?:number}
 export interface EmbeddingReply {vectors:number[][];pid:number;setupMs:number;peakRssMiB:number}
-export interface DocumentEncoder {encode(texts:string[],kind:'query'|'document'):Promise<EmbeddingReply>}
+export interface DocumentEncoder {encode(texts:string[],kind:'query'|'document'|'passage'):Promise<EmbeddingReply>}
 export const instantRuntime=()=>process.env.FE_INSTANTFIND_RUNTIME||path.join(os.homedir(),'Library/Application Support/FindEverything/instantfind');
 const configFile=()=>path.join(instantRuntime(),'config.json');
 function configuration():Configuration {
@@ -23,6 +23,7 @@ function configuration():Configuration {
   if(value.modelId!==INSTANT_MODEL||!path.isAbsolute(value.model)||!path.isAbsolute(value.python))throw new Error('Invalid instantfind configuration');
   for(const name of Object.keys(FILES))if(fs.statSync(path.join(value.model,name)).size!==value.files[name])throw new Error('Instantfind model changed; run setup again');
   if(value.tokenizerBytes!==undefined){const tokenizer=fs.lstatSync(path.join(value.model,'tokenizer.sqlite'));if(!tokenizer.isFile()||tokenizer.isSymbolicLink()||tokenizer.mode&0o077||tokenizer.size!==value.tokenizerBytes)throw new Error('Compact tokenizer changed; run setup again');}
+  if(value.coreBytes!==undefined){for(const [name,size] of [['core.onnx',value.coreBytes],['core.data',value.coreDataBytes]] as const){const file=fs.lstatSync(path.join(value.model,'onnx',name));if(!file.isFile()||file.isSymbolicLink()||file.mode&0o077||file.size!==size)throw new Error('Memory-efficient model changed; run setup again');}}
   return value;
 }
 function workerPath(){
@@ -53,7 +54,9 @@ export async function setupInstantRuntime(model:string,python:string){
     const prepare=spawnSync(python,[path.join(path.dirname(workerPath()),'compact_tokenizer.py'),path.join(target,'tokenizer.json'),compact],{encoding:'utf8',timeout:60000});
     if(prepare.status!==0)throw new Error('Compact tokenizer preparation failed: '+(prepare.stderr||prepare.error?.message||'unknown error').slice(-600));
     fs.chmodSync(compact,0o600);
-    const value:Configuration={modelId:INSTANT_MODEL,model:target,python,files:sizes,tokenizerBytes:fs.statSync(compact).size};
+    const core=spawnSync(python,[path.join(path.dirname(workerPath()),'compact_model.py'),target],{encoding:'utf8',timeout:60000});
+    if(core.status!==0)throw new Error('Memory-efficient model preparation failed: '+(core.stderr||core.error?.message||'unknown error').slice(-600));
+    const value:Configuration={modelId:INSTANT_MODEL,model:target,python,files:sizes,tokenizerBytes:fs.statSync(compact).size,coreBytes:fs.statSync(path.join(target,'onnx/core.onnx')).size,coreDataBytes:fs.statSync(path.join(target,'onnx/core.data')).size};
     const temporary=configFile()+'.'+randomUUID();fs.writeFileSync(temporary,JSON.stringify(value),{mode:0o600});fs.renameSync(temporary,configFile());
   }catch(error){fs.rmSync(target,{recursive:true,force:true});throw error;}
   return instantRuntimeStatus();
@@ -63,7 +66,7 @@ export class InstantFindWorker implements DocumentEncoder {
   private sequence=0;
   private pending?:{id:number;resolve:(reply:EmbeddingReply)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>};
   private buffer='';private tail:Promise<unknown>=Promise.resolve();private queued=0;
-  encode(texts:string[],kind:'query'|'document'):Promise<EmbeddingReply>{
+  encode(texts:string[],kind:'query'|'document'|'passage'):Promise<EmbeddingReply>{
     if(this.queued>=4)return Promise.reject(new Error('Instantfind queue is full'));
     this.queued++;
     const task=this.tail.then(()=>this.perform(texts,kind));
@@ -91,7 +94,7 @@ export class InstantFindWorker implements DocumentEncoder {
     child.on('error',error=>this.close(error));child.stdin.on('error',error=>this.close(error));
     child.on('exit',()=>{if(this.child===child)this.close(new Error(`Instantfind worker exited: ${errors}`));});
   }
-  private perform(texts:string[],kind:'query'|'document'):Promise<EmbeddingReply>{
+  private perform(texts:string[],kind:'query'|'document'|'passage'):Promise<EmbeddingReply>{
     if(!texts.length||texts.length>4||texts.some(t=>!t.trim()||t.length>8000))return Promise.reject(new Error('Use 1–4 bounded texts'));
     if(!this.child)this.start();
     const id=++this.sequence;

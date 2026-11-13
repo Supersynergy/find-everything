@@ -93,3 +93,21 @@ test('semantic index is private and reports a bounded subset',async()=>{
 test('conflicting backends are rejected rather than silently dropping constraints',async()=>{
   await expect(meaning.searchMeaning('missing',engine.parseQuery('meaning:"one" content:"two"'),20,0,encoder)).rejects.toThrow('cannot be combined');
 });
+
+test('query-focused passages expose late content without weakening filters',async()=>{
+  const f=await fixture({'a.md':'ordinary introduction '.repeat(400),'z.md':'ordinary introduction '.repeat(400)+' unique-late-anchor'});
+  const passages=content.meaningPassages(f.index,'unique-late-anchor',new Set(f.files));expect(passages.passages.find(p=>p.path===f.files[1])?.text).toContain('unique-late-anchor');
+  const focused={async encode(texts:string[]){return {vectors:texts.map(text=>{const v=Array(768).fill(0);v[text.includes('unique-late-anchor')?1:0]=1;return v;}),pid:1,setupMs:0,peakRssMiB:1};}};
+  await meaning.indexMeaning(f.index,100,5,focused);
+  const result=await meaning.searchMeaning(f.index,engine.parseQuery('meaning:"unique-late-anchor"'),20,0,focused);
+  expect(result.paths[0]).toBe(f.files[1]);expect(result.snippets[0].text).toContain('unique-late-anchor');
+  const filtered=await meaning.searchMeaning(f.index,engine.parseQuery('meaning:"unique-late-anchor" name:a.md'),20,0,focused);
+  expect(filtered.paths).toEqual([f.files[0]]);
+});
+test('confident rare-word evidence resolves a tie while ordinary words keep semantic order',async()=>{
+  const entries:Record<string,string>={};for(let i=0;i<99;i++)entries[String(i).padStart(3,'0')+'.md']='routine note';entries['z.md']='quartz saxophone hydrangea nebula';
+  const f=await fixture(entries);await meaning.indexMeaning(f.index,100,5,encoder);
+  const result=await meaning.searchMeaning(f.index,engine.parseQuery('meaning:"quartz saxophone hydrangea nebula"'),20,0,encoder);
+  expect(result.paths[0]).toBe(f.files.at(-1)!);expect('scores' in result&&result.scores[0].similarity).toBe(1);
+  expect((await meaning.searchMeaning(f.index,engine.parseQuery('meaning:"routine"'),20,0,encoder)).paths[0]).toBe(f.files[0]);
+});

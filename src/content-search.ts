@@ -280,3 +280,27 @@ export async function clearContents(index:string) {
     store.exec('VACUUM');return {cleared:true,indexed:0};
   } finally {db?.close();release();}
 }
+
+/** Query-focused, late passages from the prepared full-text cache; no source document reads. */
+export function meaningPassages(index:string,query:string,allowed:ReadonlySet<string>):{passages:{path:string;text:string}[];lexical:Map<string,number>} {
+  const stop=new Set(('a an and are as at be by can do does for from has have how i in is it me my of on or our than that the their then these this to was we were what when where which who will with would '+
+    'aber alle als am an auch auf aus bei bitte das dass dem den der des die diese dieser dieses ein eine einem einen einer eines es finde finden fuer für hat ich im ist kann mit nach nicht oder sich sie sind so suche ueber über um und uns von vor wann warum was welche welcher welches wie wir wo zum zur '+
+    'bearbeitbare bearbeitbaren bearbeitbares editable datei dateien document documents dokument dokumente file files find guide locate report bericht beschrieben describes describing').split(/\s+/));
+  const terms=[...new Set(query.toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}_-]{2,}/gu)||[])].filter(t=>!stop.has(t)).sort((a,b)=>b.length-a.length).slice(0,32);
+  if(!terms.length)return {passages:[],lexical:new Map()};
+  const db=openCache(index,true);db.exec('PRAGMA cache_size=-256');
+  try {
+    const expression=terms.map(t=>'"'+t.replaceAll('"','""')+'"').join(' OR ');
+    const rows=db.query("SELECT bodies.path,snippet(bodies,1,'','',' … ',40) AS text,bm25(bodies) AS rank FROM bodies JOIN files f ON f.path=bodies.path WHERE bodies MATCH ? AND f.seen=? AND f.status='ok' ORDER BY bm25(bodies),bodies.path LIMIT 200").all(expression,getMeta(db,'source')) as {path:string;text:string;rank:number}[];
+    const lexical=new Map(rows.filter(row=>allowed.has(row.path)).map(row=>[row.path,-row.rank]));
+    const locate=db.query('SELECT instr(body,?) AS position FROM bodies WHERE path=?');
+    const selected:{path:string;text:string}[]=[];
+    for(const row of rows){
+      if(!allowed.has(row.path))continue;
+      const late=row.text.split(' … ').map(text=>text.trim()).filter(Boolean).map(text=>({text,position:(locate.get(text,row.path) as {position:number}|null)?.position||0,hits:terms.filter(t=>text.toLowerCase().includes(t)).length})).filter(p=>p.position>4900).sort((a,b)=>b.hits-a.hits);
+      for(const part of late.slice(0,2)){const text=part.text.replace(/\s+/g,' ').trim();if(text)selected.push({path:row.path,text:text.slice(0,700)});if(selected.length>=12)break;}
+      if(selected.length>=12)break;
+    }
+    return {passages:selected,lexical};
+  }finally{db.close();}
+}

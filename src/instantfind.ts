@@ -4,19 +4,19 @@ import {createHash,randomUUID} from 'node:crypto';
 import {Database} from 'bun:sqlite';
 import {INDEX_DIR,ParsedQuery,compareSearchProperties,parseQuery} from './engine';
 import {validateName,acquireLock} from './catalog';
-import {readCachedContent,contentSnapshotId,matchesCachedContent,CachedContentRecord} from './content-search';
+import {readCachedContent,contentSnapshotId,matchesCachedContent,meaningPassages,CachedContentRecord} from './content-search';
 import {instantEncoder,instantRuntimeStatus,INSTANT_MODEL,DocumentEncoder,EmbeddingReply} from './instantfind-worker';
 
 const DIMENSIONS=768;
 export const meaningPath=(index:string)=>path.join(INDEX_DIR,`meaning-${validateName(index)}.sqlite`);
-type Chunk={path:string;text:string;hash:string;vector:Float32Array};
+type Chunk={path:string;position:number;hash:string;vector:Float32Array};
 type Stored={snapshot:string;revision:string;limited:boolean;sourceComplete:boolean;documents:Map<string,CachedContentRecord>;chunks:Chunk[]};
 let cached:{file:string;stamp:string;value:Stored}|undefined;
 const queries=new Map<string,EmbeddingReply>();
 function open(file:string,readonly=true){
   const stat=fs.lstatSync(file);
   if(!stat.isFile()||stat.isSymbolicLink()||stat.mode&0o077||process.getuid&&stat.uid!==process.getuid())throw new Error('Unsafe instantfind index');
-  return new Database(file,{readonly,create:false});
+  const db=new Database(file,{readonly,create:false});db.exec('PRAGMA cache_size=-256');return db;
 }
 const digest=(text:string)=>createHash('sha256').update(INSTANT_MODEL).update(text).digest('hex');
 export function documentChunks(row:CachedContentRecord):string[]{
@@ -37,14 +37,14 @@ function readIndex(index:string,pending=false):Stored {
     if(files.length>10000)throw new Error('Instantfind document limit exceeded');
     const documents=new Map<string,CachedContentRecord>();
     for(const row of files){const record=JSON.parse(row.record) as CachedContentRecord;documents.set(record.path,record);}
-    const rows=db.query('SELECT path,text,hash,vector FROM chunks ORDER BY path,position').all() as {path:string;text:string;hash:string;vector:Uint8Array}[];
-    if(rows.length>60000)throw new Error('Instantfind chunk limit exceeded');
-    const chunks=rows.map(row=>{
+    const chunks:Chunk[]=[];
+    for(const row of db.query('SELECT path,position,hash,vector FROM chunks ORDER BY path,position').iterate() as Iterable<{path:string;position:number;hash:string;vector:Uint8Array}>){
+      if(chunks.length>=60000)throw new Error('Instantfind chunk limit exceeded');
       if(!documents.has(row.path)||row.vector.byteLength!==DIMENSIONS*4)throw new Error('Invalid instantfind index row');
       const vector=new Float32Array(row.vector.buffer.slice(row.vector.byteOffset,row.vector.byteOffset+row.vector.byteLength));
       if(!vector.every(Number.isFinite))throw new Error('Invalid instantfind vector');
-      return {...row,vector};
-    });
+      chunks.push({path:row.path,position:row.position,hash:row.hash,vector});
+    }
     const value={snapshot:meta.snapshot,revision:stamp,limited:meta.limited==='true',sourceComplete:meta.complete==='true',documents,chunks};
     cached={file,stamp,value};return value;
   }finally{db.close();}
@@ -64,7 +64,7 @@ export async function indexMeaning(index:string,maxFiles=500,seconds=60,encoder:
     const previous=fs.existsSync(file)?new Map(readIndex(index).chunks.map(c=>[c.hash,c.vector])):new Map<string,Float32Array>();
     if(fs.existsSync(file+'.pending'))for(const chunk of readIndex(index,true).chunks)previous.set(chunk.hash,chunk.vector);
     const fd=fs.openSync(temporary,'wx',0o600);fs.closeSync(fd);db=new Database(temporary);
-    db.exec('CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE files(path TEXT PRIMARY KEY,record TEXT); CREATE TABLE chunks(path TEXT,position INTEGER,text TEXT,hash TEXT,vector BLOB);');
+    db.exec('CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE files(path TEXT PRIMARY KEY,record TEXT); CREATE TABLE chunks(path TEXT,position INTEGER,text TEXT,hash TEXT,vector BLOB); CREATE INDEX chunk_location ON chunks(path,position); BEGIN IMMEDIATE;');
     const addFile=db.query('INSERT INTO files VALUES (?,?)'),addChunk=db.query('INSERT INTO chunks VALUES (?,?,?,?,?)');
     let documents=0;
     for(const record of snapshot.records){
@@ -84,7 +84,7 @@ export async function indexMeaning(index:string,maxFiles=500,seconds=60,encoder:
     if(contentSnapshotId(index)!==snapshot.snapshot)throw new Error('Document cache changed during indexing; previous index retained');
     const meta=db.query('INSERT INTO meta VALUES (?,?)');
     for(const [key,value] of Object.entries({model:INSTANT_MODEL,snapshot:snapshot.snapshot,limited:String(snapshot.limited),complete:String(snapshot.complete),created:new Date().toISOString()}))meta.run(key,value);
-    db.close();db=undefined;
+    db.exec('COMMIT');db.close();db=undefined;
     const destination=pending?file+'.pending':file;
     fs.renameSync(temporary,destination);cached=undefined;
     if(!pending)fs.rmSync(file+'.pending',{force:true});
@@ -105,22 +105,35 @@ export async function searchMeaning(index:string,pq:ParsedQuery,limit:number,off
   let encoded=encoder===instantEncoder?queries.get(key):undefined;
   if(!encoded){encoded=await encoder.encode([pq.meaning],'query');if(encoder===instantEncoder){if(queries.size>=128)queries.delete(queries.keys().next().value!);queries.set(key,encoded);}}
   const vector=encoded.vectors[0];if(vector.length!==DIMENSIONS)throw new Error('Invalid query embedding');
-  const best=new Map<string,{path:string;score:number;text:string;exact:boolean}>();
+  const best=new Map<string,{path:string;score:number;rankScore:number;position:number;exact:boolean;passage?:string}>();
   for(const chunk of data.chunks){
     if(!documents.has(chunk.path))continue;
     let score=0;for(let i=0;i<DIMENSIONS;i++)score+=vector[i]*chunk.vector[i];
     const name=path.basename(chunk.path).toLowerCase(),term=pq.meaning.toLowerCase();
     const exact=term===name||term===name.slice(0,name.length-path.extname(name).length);
-    if(!best.has(chunk.path)||score>best.get(chunk.path)!.score)best.set(chunk.path,{path:chunk.path,score,text:chunk.text.slice(0,700),exact});
+    if(!best.has(chunk.path)||score>best.get(chunk.path)!.score)best.set(chunk.path,{path:chunk.path,score,rankScore:score,position:chunk.position,exact});
   }
-  const ranked=[...best.values()].sort((a,b)=>pq.sort&&pq.sort!=='relevance'?compareSearchProperties(documents.get(a.path)!,documents.get(b.path)!,pq.sort):Number(b.exact)-Number(a.exact)||b.score-a.score||a.path.localeCompare(b.path));
+  let peakRssMiB=encoded.peakRssMiB;
+  const {passages,lexical}=meaningPassages(index,pq.meaning,new Set(best.keys()));
+  for(const passage of passages){
+    const embedded=await encoder.encode([passage.text],'passage');
+    peakRssMiB=Math.max(peakRssMiB,embedded.peakRssMiB);
+    const v=embedded.vectors[0];if(v.length!==DIMENSIONS||!v.every(Number.isFinite))throw new Error('Invalid passage embedding');
+    let score=0;for(let i=0;i<DIMENSIONS;i++)score+=vector[i]*v[i];
+    const row=best.get(passage.path)!;const refined=0.7*score+0.3*row.score;
+    if(refined>row.rankScore){row.rankScore=refined;row.passage=passage.text;}
+  }
+  const ranked=[...best.values()].sort((a,b)=>pq.sort&&pq.sort!=='relevance'?compareSearchProperties(documents.get(a.path)!,documents.get(b.path)!,pq.sort):Number(b.exact)-Number(a.exact)||b.rankScore-a.rankScore||(lexical.get(b.path)||0)-(lexical.get(a.path)||0)||a.path.localeCompare(b.path));
   const currentMatches=ranked.filter(row=>matchesCachedContent(documents.get(row.path)!,pq));
   const selected=currentMatches.slice(offset,offset+limit);
+  const snippetsDb=open(meaningPath(index));
+  let snippets:{path:string;text:string}[];
+  try {const text=snippetsDb.query('SELECT substr(text,1,700) AS text FROM chunks WHERE path=? AND position=?');snippets=selected.map(row=>({path:row.path,text:row.passage||(text.get(row.path,row.position) as {text:string}|null)?.text||''}));}finally{snippetsDb.close();}
   const current=fs.statSync(meaningPath(index));
   if(contentSnapshotId(index)!==data.snapshot||`${current.ino}:${current.size}:${current.mtimeMs}:${current.ctimeMs}`!==data.revision)return empty('Document cache changed during search; retry after refreshing');
-  return {paths:selected.map(r=>r.path),scores:selected.map(({path,score})=>({path,similarity:score})),snippets:selected.map(r=>({path:r.path,text:r.text})),
+  return {paths:selected.map(r=>r.path),scores:selected.map(({path,score})=>({path,similarity:score})),snippets,
     properties:selected.map(r=>({path:r.path,size:documents.get(r.path)!.size,mtime:documents.get(r.path)!.mtime,dir:0})),
     complete:false,instantfind:true,snapshot:true,snapshotId:data.snapshot+':'+INSTANT_MODEL+':'+data.revision,offset,nextOffset:offset+selected.length<currentMatches.length?offset+selected.length:null,
-    coverage:{indexed:data.documents.size,eligible:documents.size,matched:currentMatches.length,limited:data.limited},runtime:{pid:encoded.pid,setupMs:encoded.setupMs,peakRssMiB:encoded.peakRssMiB},
+    coverage:{indexed:data.documents.size,eligible:documents.size,matched:currentMatches.length,limited:data.limited},runtime:{pid:encoded.pid,setupMs:encoded.setupMs,peakRssMiB,refinedPassages:passages.length},
     warnings:['Approximate meaning search over cached document excerpts; not exhaustive. Changed or filtered files are excluded.',...(data.limited?['Document preparation limit reached; narrow the index or increase its explicit budget.']:[])]};
 }
