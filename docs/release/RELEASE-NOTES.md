@@ -1,4 +1,6 @@
-# Find Everything 0.3.41 · Apple Silicon preview
+# Find Everything 0.3.42 · Apple Silicon preview
+
+This release integrates the completed Instantfind passage-refinement work with the special-character and native-table improvements from 0.3.41. Up to twelve selected late passages improve document recall, with additional query latency. See [the real-document measurements](../INSTANTFIND.md).
 
 Use Filters → Literal text or `fe search --literal --query 'a|b'` to search punctuation as text. For example, `literal:"report (final)!"` keeps the exclamation mark and parentheses. Quotes and backslashes work too. Escaped CR/LF filenames keep their meaning, and returned paths retain decomposed accents. NUL is rejected because a filename cannot contain it.
 
@@ -8,6 +10,6 @@ AppKit now manages a moving window of at most 10,000 rows. Scrolling continues i
 
 `fe explain QUERY --index NAME` shows matching rules and active visibility filters together with saved-index warnings. It reads metadata without scanning folders. Interrupted compaction checks every component before renaming anything: changed targets or missing stages stop publication and preserve the files. Invalid checkpoint offsets and unknown compact subcommands now fail explicitly.
 
-See [search modes and research](../SEARCH-0.3.41.md) for details, including limits on Unicode matching. The [benchmark evidence](../benchmarks/2026-11-13/v0.3.41-summary.json) records the measured workload. Existing compaction and count caching remain available; local OCR and Instantfind are retained.
+See [search modes and research](../SEARCH-0.3.42.md) for details, including limits on Unicode matching. The [benchmark evidence](../benchmarks/2026-11-13/v0.3.42-summary.json) records the measured workload. Existing compaction and count caching remain available; local OCR and Instantfind are retained.
 
 This is an Apple Silicon preview for macOS 15+, locally signed and not notarized. Permissions still apply. Configured exclusions and journal gaps can limit coverage, and some document formats remain unsupported. Fault-injection tests cover process termination and changed or missing publication files. They do not prove recovery from every hardware failure. Intel and manual VoiceOver acceptance remain unverified.

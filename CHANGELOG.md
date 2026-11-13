@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.42 — 2026-11-13
 
 - Refine document ranking with up to twelve query-selected late passages from the full-text cache. Keep snippets in SQLite until requested; preserve hard filters and original cosine scores. Split the pinned model graph from its token table and map only requested rows to reduce search memory without changing model vectors. Passage refinement adds query latency.
 

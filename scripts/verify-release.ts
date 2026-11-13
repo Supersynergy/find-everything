@@ -18,7 +18,7 @@ function check(ok: unknown, message: string): asserts ok { if (!ok) throw new Er
 
 const version = (JSON.parse(read("package.json")) as { version: string }).version;
 const manifest = JSON.parse(read("release-artifacts/release.json")) as Manifest;
-check(version === '0.3.41' && manifest.version === version && manifest.tag === `v${version}`, "Version/tag mismatch");
+check(version === '0.3.42' && manifest.version === version && manifest.tag === `v${version}`, "Version/tag mismatch");
 check(manifest.preview === true && manifest.notarized === false && manifest.architecture === "arm64", "Preview must not claim notarized, stable or universal distribution");
 check(read("src/services.ts").includes(`export const VERSION = "${version}"`), "CLI source version mismatch");
 check(read("app/bundle-app.sh").split(`<string>${version}</string>`).length === 3, "Native bundle version mismatch");
