@@ -247,3 +247,25 @@ test("shell arguments remain literal and index locks recover only after their ow
     assert.equal(existsSync(lock), false);
   } finally { f.cleanup(); }
 });
+
+test("persistent CLI search preserves saved results after invalid input", () => {
+  const f = fixture();
+  try {
+    f.run("index", f.root, "--name", "session");
+    const queries = ["ext:txt", "überblick"];
+    const output = execFileSync(executable, [...prefix, "search-session", "--index", "session"], {
+      env: f.env, encoding: "utf8", timeout: 10000,
+      input: [JSON.stringify(queries[0]), "{", JSON.stringify(queries[1])].join("\n")
+    });
+    const rows = output.trimEnd().split("\n").map(line => JSON.parse(line));
+    assert.equal(rows.length, 3);
+    assert.ok(rows[1].error);
+    for (const [i, query] of queries.entries()) {
+      const baseline = f.json("search", query, "--index", "session");
+      const result = rows[i * 2].data;
+      assert.ok(result.paths.length);
+      assert.deepEqual(result.paths, baseline.paths);
+      assert.equal(result.complete, baseline.complete);
+    }
+  } finally { f.cleanup(); }
+});

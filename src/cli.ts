@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import { createInterface } from "node:readline";
+import { once } from "node:events";
 import * as fs from "fs";
 import * as path from "path";
 import { spawn, ChildProcess } from "child_process";
@@ -115,6 +117,7 @@ const HELP = `fe — Find Everything ${VERSION}
 
   fe [search] <query>             ranked paths; no command opens the picker
   fe index [folder ...]          rebuild a scope, folder or project index
+  fe search-session --index NAME read JSON query strings from stdin, one per line
   fe indexes                     list built-in and saved indexes
   fe indexes remove <name>       forget a profile (keeps files and cache)
   fe watch --index <name>        incremental journal updates; foreground
@@ -208,6 +211,30 @@ async function cmdSearch(q: string, flags: Flags): Promise<void> {
   for (const p of result.paths) process.stdout.write(flags.tui ? `${p}\t${path.basename(p)}  ${path.dirname(p).replace(HOME, "~")}\n` : p + (flags.nul ? "\0" : "\n"));
 }
 
+async function searchSession(flags: Flags): Promise<void> {
+  if (flags.fresh || flags.paths.length || flags.socket || Object.keys(flags.opts).length)
+    throw new Error("search-session reads saved indexes; use --index NAME");
+  const { scope, opts } = selection(flags);
+  if (!fs.existsSync(indexPathFor(scope))) throw new Error("Create the saved index before starting a session");
+  const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      let reply;
+      try {
+        const query: unknown = JSON.parse(line);
+        if (typeof query !== "string") throw new Error("Expected a JSON query string");
+        reply = { data: await searchFiles(query, scope, flags.limit, opts, false, true, flags.offset) };
+      } catch (error) {
+        reply = { error: error instanceof Error ? error.message : String(error) };
+      }
+      if (!process.stdout.write(JSON.stringify(reply) + "\n")) await once(process.stdout, "drain");
+    }
+  } finally {
+    lines.close();
+    closeSoundWorker();
+  }
+}
+
 async function cmdIndex(pos: string[], flags: Flags, worker = false): Promise<void> {
   flags.paths.push(...pos);
   let scanned = 0;
@@ -294,6 +321,7 @@ async function main(): Promise<void> {
   const [cmd, ...rest] = pos;
   if (flags.help || cmd === "help") return void console.log(HELP);
   switch (cmd) {
+    case "search-session": return searchSession(flags);
     case '_search-worker':return serveSearchWorker();
     case '_live-worker':return serveLiveWorker(JSON.parse(rest[0]??'null'));
     case 'learn': {

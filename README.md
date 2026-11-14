@@ -25,6 +25,14 @@ Local-first file search for macOS. Find a filename across folders, combine preci
 > **Apple Silicon preview — not notarized.** The downloadable build is locally signed, not signed with a trusted Developer ID or Apple-notarized. Gatekeeper may refuse it. We do not recommend disabling Gatekeeper, removing quarantine or changing privacy permissions to bypass this. Build from source with your own signing identity, or wait for a notarized release. Intel and older macOS versions have not been verified.
 
 
+## Search repeatedly from a local script
+
+Start `fe search-session --index work` with a saved index. Write one JSON query string per line to stdin. The process replies in order with `{"data": ...}` (the usual JSON search result) or `{"error": "..."}` for that query. Close stdin to release the worker. For example:
+
+```sh
+printf '%s\n' '"ext:pdf"' '"ext:md"' | fe search-session --index work --limit 10
+```
+
 ## Features
 
 ### Find the file, not just a matching folder
