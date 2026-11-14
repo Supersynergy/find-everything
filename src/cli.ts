@@ -15,6 +15,7 @@ import { indexSounds, closeSoundWorker } from "./semantic";
 import { runtimeDir, semanticStatus } from "./semantic-worker";
 import { startLive } from "./live";
 import { serveLiveWorker } from './live-process';
+import {directoryListingChild,retryCommand} from './targeted-rescan';
 import {journalStatus,requestJournalMerge} from './journal-status';
 import {compactIndex,compactionStatus,reconcileIndex} from './compaction';
 import { prepareSearch, indexProperties, searchIndexStatus } from './path-search';
@@ -182,6 +183,7 @@ Path indexes store names and paths; fe content index explicitly prepares local d
   fe content index|status|clear --index NAME [--ocr --ocr-pages 32] [--max-files 500 --seconds 60] [--json]
   fe compact [status] --index NAME --rows 1000000 --seconds 30   resume saved-change merge
   fe journal [merge] --index NAME                           inspect counts or request a live merge
+  fe retries [import FD-DIAGNOSTICS] --index NAME            inspect or seed directory recovery
   fe reconcile --index NAME                                 explicitly scan configured roots
   fe search 'content:"quarterly revenue" ext:pdf' --index NAME --json
 Text/code, extractable PDFs and macOS Office/RTF are supported within reported limits. Local OCR is explicit with --ocr.
@@ -296,6 +298,7 @@ async function main(): Promise<void> {
   const [cmd, ...rest] = pos;
   if (flags.help || cmd === "help") return void console.log(HELP);
   switch (cmd) {
+    case '_directory-list':return directoryListingChild(rest[0]);
     case '_search-worker':return serveSearchWorker();
     case '_live-worker':return serveLiveWorker(JSON.parse(rest[0]??'null'));
     case 'learn': {
@@ -328,6 +331,7 @@ async function main(): Promise<void> {
       const normalizedQuery=normalizeQuery(flags.literal?'literal:'+JSON.stringify(query):query),parsed=parseQuery(normalizedQuery);
       console.log(JSON.stringify({query,normalizedQuery,index:scope,matching:{case:parsed.matchCase===undefined?'smart':parsed.matchCase?'sensitive':'insensitive',wholeWord:parsed.wholeWord??false,terms:parsed.fuzzy,constraints:parsed.constraints},visibility:{smart:parsed.smart??false,omitted:parsed.omit??[],favoritesOnly:parsed.favorites!==undefined},snapshot:indexStatus().find(s=>s.name===scope)??null,lookup:searchIndexStatus(scope,false),notes:['Reads saved index metadata; does not scan folders or execute a search.','Explicit size/date filters need known cached properties.','Index warnings remain evidence of incomplete coverage.']}));return;
     }
+    case 'retries':{const {scope}=selection(flags);console.log(JSON.stringify(retryCommand(scope,rest)));return;}
     case 'journal':{if(rest.length>1||(rest.length&&rest[0]!=='merge'))throw new Error('Usage: fe journal [merge] --index NAME');const {scope}=selection(flags);console.log(JSON.stringify(rest.length?requestJournalMerge(scope):journalStatus(scope)));return;}
     case 'compact':{if(rest.length>1||(rest.length&&rest[0]!=='status'))throw new Error('Usage: fe compact [status] --index NAME');const {scope}=selection(flags);console.log(JSON.stringify(rest[0]==='status'?compactionStatus(scope):await compactIndex(scope,flags.seconds,flags.rows)));return;}
     case 'reconcile':{const {scope}=selection(flags);console.log(JSON.stringify(await reconcileIndex(scope)));return;}

@@ -6,6 +6,7 @@ import path from 'node:path';
 import {execFileSync,spawnSync,spawn} from 'node:child_process';
 import {once} from 'node:events';
 import {socketRequest} from '../src/socket';
+import {initDirectoryRetries} from '../src/targeted-rescan';
 import {Database} from 'bun:sqlite';
 function fixture(){
   const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'fe-maint-'))),root=path.join(dir,'files'),data=path.join(dir,'data');fs.mkdirSync(root);fs.mkdirSync(data);
@@ -20,12 +21,22 @@ test('resumable compaction preserves new events, gaps, CR/LF paths and the previ
     fs.writeFileSync(a,'a');fs.writeFileSync(b,'b');f.run('index',f.root,'--name','demo');f.run('prepare','--index','demo');fs.writeFileSync(n,'n');
     const stat=fs.statSync(path.join(f.data,'index-demo.txt')),db=new Database(path.join(f.data,'live.sqlite'),{create:true});
     db.exec('CREATE TABLE scopes(name TEXT PRIMARY KEY,stamp TEXT,revision INTEGER,problem TEXT,pid INTEGER,lastChange TEXT);CREATE TABLE changes(scope TEXT,path TEXT,present INTEGER,tree INTEGER,revision INTEGER,PRIMARY KEY(scope,path));CREATE TABLE jobs(scope TEXT,path TEXT,failures INTEGER,retryAt REAL,PRIMARY KEY(scope,path));');
+    initDirectoryRetries(db);
+    const originalStamp=stat.mtimeMs+':'+stat.size;
+    db.query("INSERT INTO directory_retries(scope,path,stamp,source,provider) VALUES('demo',?,?,'event','')").run(f.root+'/pending',originalStamp);
+    db.query("INSERT INTO directory_retry_seeds VALUES ('demo',?,'scan')").run(originalStamp);
     db.query('INSERT INTO scopes VALUES(?,?,1,?, ?,NULL)').run('demo',`${stat.mtimeMs}:${stat.size}`,'fixture history gap',process.pid);db.query('INSERT INTO changes VALUES(?,?,1,0,1)').run('demo',n);db.close();
     assert(f.run('search','view:all','--index','demo').paths.includes(n));
     const partial=f.run('compact','--index','demo','--rows','1');assert.equal(partial.resumable,true);
     fs.unlinkSync(b);fs.writeFileSync(late,'late');const live=new Database(path.join(f.data,'live.sqlite'));
     live.query('INSERT INTO changes VALUES(?,?,0,0,2)').run('demo',b);live.query('INSERT INTO changes VALUES(?,?,1,0,2)').run('demo',late);live.exec('UPDATE scopes SET revision=2');live.close();
     const result=f.run('compact','--index','demo');assert.equal(result.resumable,false);assert.equal(result.live.problem,'fixture history gap');
+    const migrated=new Database(path.join(f.data,'live.sqlite'),{readonly:true});
+    const stamp=migrated.query("SELECT stamp FROM scopes WHERE name='demo'").get().stamp;
+    assert.notEqual(stamp,originalStamp);
+    assert.deepEqual(migrated.query("SELECT stamp,generation FROM directory_retries WHERE scope='demo'").get(),{stamp,generation:2});
+    assert.equal(migrated.query("SELECT stamp FROM directory_retry_seeds WHERE scope='demo'").get().stamp,stamp);
+    migrated.close();
     const found=f.run('search','view:all','--index','demo');assert.deepEqual(found.paths.slice().sort(),[a,n,late].sort());assert.equal(found.complete,false);
     assert(fs.existsSync(path.join(f.data,'index-demo.txt.compacting/previous.paths')));
     fs.unlinkSync(n);const later=new Database(path.join(f.data,'live.sqlite'));later.query('INSERT OR REPLACE INTO changes VALUES(?,?,0,0,3)').run('demo',n);later.exec('UPDATE scopes SET revision=3');later.close();
@@ -59,7 +70,8 @@ test('exact short-query counts survive reader restart and invalidate after an ex
   const f=fixture();try{
     fs.writeFileSync(path.join(f.root,'ne-first.txt'),'x');f.run('index',f.root,'--name','demo');
     fs.writeFileSync(path.join(f.data,'index-demo.txt'),Array.from({length:100000},(_,i)=>path.join(f.root,`ne-${i}.txt`)).join('\n')+'\n');f.run('prepare','--index','demo');
-    const code=`import {Database} from 'bun:sqlite';let counts=0;const query=Database.prototype.query;Database.prototype.query=function(sql){if(/count\\(\\*\\).*FROM files f/i.test(sql))counts++;return query.call(this,sql);};const {searchFiles}=await import(${JSON.stringify(path.resolve('src/services.ts'))});const result=await searchFiles('ne sort:name','demo',10,{},false,true);console.log(JSON.stringify({counts,matched:result.coverage.matched,paths:result.paths}));`;
+    const code=`import {initDirectoryRetries} from '../src/targeted-rescan';
+import {Database} from 'bun:sqlite';let counts=0;const query=Database.prototype.query;Database.prototype.query=function(sql){if(/count\\(\\*\\).*FROM files f/i.test(sql))counts++;return query.call(this,sql);};const {searchFiles}=await import(${JSON.stringify(path.resolve('src/services.ts'))});const result=await searchFiles('ne sort:name','demo',10,{},false,true);console.log(JSON.stringify({counts,matched:result.coverage.matched,paths:result.paths}));`;
     const first=f.evaluate(code),second=f.evaluate(code);assert.equal(first.matched,100000);assert(first.counts>0);assert.equal(second.counts,0);assert.deepEqual(second.paths,first.paths);
     const db=new Database(path.join(f.data,'search-demo.sqlite'));db.exec("UPDATE files SET name='other.txt',nameKey='other.txt' WHERE id=1");db.close();
     const changed=f.evaluate(code);assert(changed.counts>0);assert.equal(changed.matched,99999);

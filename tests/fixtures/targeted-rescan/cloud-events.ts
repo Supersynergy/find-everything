@@ -1,0 +1,37 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import {execFileSync} from 'node:child_process';
+import {Database} from 'bun:sqlite';
+import {HOME,INDEX_DIR} from '../../../src/engine';
+import {startLive} from '../../../src/live';
+import {livePath} from '../../../src/delta';
+import {retryCommand} from '../../../src/targeted-rescan';
+const cloud=path.join(HOME,'Library','CloudStorage'),provider=path.join(cloud,'disk'),missing=path.join(provider,'Music'),media=path.join(missing,'recording.mp3');
+fs.mkdirSync(missing,{recursive:true});fs.writeFileSync(media,'');
+const cli=path.resolve('src/cli.ts'),name='cloudtest';
+execFileSync(process.execPath,[cli,'index',cloud,'--name',name,'--exhaustive']);execFileSync(process.execPath,[cli,'prepare','--index',name]);
+fs.renameSync(provider,provider+'-offline');
+const meta=path.join(INDEX_DIR,'index-'+name+'.json');const data=JSON.parse(fs.readFileSync(meta,'utf8'));
+data.retryDirectories=[missing,missing];fs.writeFileSync(meta,JSON.stringify(data));
+fs.writeFileSync(path.join(INDEX_DIR,'media-'+name+'.sqlite'),'');
+const helper=process.env.FE_EVENTS_HELPER!;
+fs.writeFileSync(helper,`#!${process.execPath}\nlet input='';for await(const chunk of process.stdin)input+=chunk;const root=JSON.parse(input).roots[0].path;console.log(JSON.stringify({root,uuid:'dev',cursor:'100',events:[{path:${JSON.stringify(missing)},flags:131584},{path:${JSON.stringify(media)},flags:512},{path:root,flags:4}]}));setInterval(()=>{},1000);`,{mode:0o700});
+const wait=async(check:()=>boolean)=>{const end=Date.now()+10000;while(!check()){if(Date.now()>end)throw Error('Timed out waiting for watcher');await new Promise(r=>setTimeout(r,40));}};
+let stop=await startLive([name],20),db=new Database(livePath(),{readonly:true});
+try{
+  await wait(()=>!!db.query("SELECT 1 FROM streams WHERE cursor='100'").get());
+  assert.equal(db.query('SELECT count(*) n FROM changes WHERE scope=?').get(name).n,0);
+  assert.equal(db.query('SELECT count(*) n FROM jobs WHERE scope=?').get(name).n,0);
+  assert.equal(db.query('SELECT count(*) n FROM directory_retry_seeds WHERE source=?').get('scan').n,1);
+  assert(db.query('SELECT problem FROM scopes WHERE name=?').get(name).problem.includes('journal gap'));
+  await wait(()=>!!db.query('SELECT 1 FROM directory_retries WHERE attempts>0').get());
+  assert.equal(db.query('SELECT count(*) n FROM changes WHERE scope=?').get(name).n,0);
+  fs.writeFileSync(helper,`#!${process.execPath}\nfor await(const c of process.stdin){};console.log(JSON.stringify({root:${JSON.stringify(cloud)},uuid:'dev',cursor:'101',events:[{path:${JSON.stringify(cloud)},flags:16}]}));setInterval(()=>{},1000);`,{mode:0o700});
+  db.close();stop();stop=await startLive([name],20);db=new Database(livePath(),{readonly:true});
+  await wait(()=>!!db.query("SELECT 1 FROM streams WHERE cursor='101'").get());
+  assert.equal(db.query("SELECT count(*) n FROM directory_retry_seeds WHERE source='scan'").get().n,1);
+  assert(db.query('SELECT 1 FROM directory_retries WHERE attempts>0').get());
+  const input=path.join(HOME,'old-report');fs.writeFileSync(input,'[fd error]: '+missing+'/other: Operation timed out (os error 60)\n[fd error]: /etc: Permission denied (os error 13)\n');
+  assert.equal(retryCommand(name,['import',input]).imported,1);assert.equal(retryCommand(name,['import',input]).imported,0);
+}finally{db.close();stop();}

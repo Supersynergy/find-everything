@@ -1,7 +1,7 @@
 {
   "$schema": "https://www.raycast.com/schemas/extension.json",
   "name": "find-everything",
-  "version": "0.3.47",
+  "version": "0.3.48",
   "title": "Find Everything",
   "description": "Instant Spotlight-free file search: persistent fd index, rg filter, fzf ranking. Finds more than Spotlight ever did.",
   "icon": "icon.png",

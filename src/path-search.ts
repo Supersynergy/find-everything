@@ -596,6 +596,102 @@ export function searchPrepared(index:string,pq:ParsedQuery,limit:number,offset:n
   }
 }
 
+/** Exact selective filename search while the prepared lookup trails the journal.
+ * FTS enumerates every prepared name/parent containing the literal. Fold only
+ * pending rows matching the same query, then check each candidate's ancestry.
+ * Higher-cardinality searches use the regular ordered, resumable lookup. */
+export function canReadPendingLiteral(pq:ParsedQuery,offset:number) {
+  if(offset||pq.sort||pq.smart||pq.wholeWord||pq.matchCase!==undefined||pq.omit?.length||pq.favorites||pq.fuzzy.length||pq.sizeFilter||pq.dmFilter||pq.constraints.length!==1)return false;
+  const c=pq.constraints[0];
+  return !c.negate&&c.field!=='folder'&&!!c.literal&&[...c.literal].length>=3&&!c.literal.includes('/');
+}
+export function exactPendingLiteral(index:string,pq:ParsedQuery,limit:number,pending:PendingSearch,preview=false) {
+  const prepared=openReady(index,true);if(!prepared)return;
+  const live=new Database(livePath(),{readonly:true}),literal=pq.constraints[0].literal!.normalize('NFC').toLowerCase(),nameOnly=pq.constraints[0].field==='name';
+  const candidates=new Map<string,string>(),quoted='"'+literal.replace(/"/g,'""')+'"';
+  // Keeping all matches below a fixed ceiling permits the ordinary SQLite
+  // ordering for broad/paginated results and bounds memory for this fast path.
+  const maxCandidates=512;
+  const add=(p:string)=>{
+    const clean=p.replace(/\/$/,'')||'/';
+    const target=nameOnly?path.basename(clean):clean;
+    if(target.normalize('NFC').toLowerCase().includes(literal)&&(!candidates.has(clean)||p.endsWith('/')))candidates.set(clean,p);
+    return candidates.size<=maxCandidates;
+  };
+  try{
+    prepared.exec('BEGIN');live.exec('PRAGMA busy_timeout=1000; BEGIN');
+    const source=getMeta(prepared,'source'),applied=Number(getMeta(prepared,'liveRevision'));
+    const state=live.query('SELECT revision FROM scopes WHERE name=? AND stamp=?').get(index,source);
+    if(source!==pending.source||!state||baseStamp(index)!==source)return;
+    const tables=journalTables(live).filter(t=>t!=='tree_barriers');
+    if(preview){
+      // Count index entries before filtering by membership or term. A no-match
+      // preview remains bounded even with millions of unrelated tombstones.
+      let budget=16384;
+      for(const t of tables){
+        const n=live.query('SELECT count(*) AS n FROM (SELECT 1 FROM '+t+' INDEXED BY '+t+'_revision WHERE scope=? AND revision>? LIMIT ?)').get(index,applied,budget+1).n;
+        if(n>budget)return;
+        budget-=n;
+      }
+    }
+    const nameRows=prepared.query('SELECT '+FULL+' AS path FROM names_fts JOIN files f ON f.id=names_fts.rowid JOIN directories d ON d.id=f.parent WHERE names_fts MATCH ? LIMIT ?').all(quoted,maxCandidates+1);
+    if(nameRows.length>maxCandidates)return;
+    for(const row of nameRows)if(!add(row.path))return;
+    if(!nameOnly){
+      const parentRows=prepared.query('SELECT '+FULL+' AS path FROM directories_fts CROSS JOIN directories d ON d.id=directories_fts.rowid CROSS JOIN files f ON f.parent=d.id WHERE directories_fts MATCH ? LIMIT ?').all(quoted,maxCandidates+1);
+      if(parentRows.length>maxCandidates)return;
+      for(const row of parentRows)if(!add(row.path))return;
+    }
+    // Search pending rows only. An ASCII anchor avoids invoking JS for every row
+    // while remaining conservative for NFC/case folding of Unicode names.
+    const anchor=literal.match(/[._0-9 -]+/g)?.sort((a,b)=>b.length-a.length)[0];
+    const textAnchor=anchor||literal.match(/[a-z]{3,}/)?.[0];
+    // Non-ASCII paths can normalize to ASCII (e.g. Kelvin sign); include those
+    // candidates for the JS normalization check when using a letter anchor.
+    const asciiFast=anchor?' AND instr(path,?)>0':textAnchor?" AND (instr(lower(path),?)>0 OR length(path)<>length(CAST(path AS BLOB)))":'';
+    for(const t of tables){
+      const rows=live.query('SELECT path FROM '+t+' WHERE scope=? AND revision>? AND present=1'+asciiFast).iterate(index,applied,...(textAnchor?[textAnchor]:[]));
+      for(const row of rows)if(!add(row.path))return;
+    }
+    const exact=live.query(tables.map(t=>'SELECT present,revision FROM '+t+' WHERE scope=? AND path=?').join(' UNION ALL ')+' ORDER BY revision DESC LIMIT 1');
+    const layers=journalTables(live);
+    const barrier=live.query(layers.map(t=>'SELECT revision FROM '+t+' WHERE scope=? AND path=?'+(t==='tree_barriers'?'':' AND tree=1')).join(' UNION ALL ')+' ORDER BY revision DESC LIMIT 1');
+    const cutoffs=new Map<string,number>();
+    const cutoff=(p:string):number=>{
+      if(cutoffs.has(p))return cutoffs.get(p)!;
+      const own=barrier.get(...layers.flatMap(()=>[index,p]))?.revision??-1;
+      const value=p===path.dirname(p)?own:Math.max(own,cutoff(path.dirname(p)));
+      cutoffs.set(p,value);return value;
+    };
+    const visible=new Map<string,string>();
+    for(const [clean,display] of candidates){
+      const own=exact.get(...tables.flatMap(()=>[index,clean]));
+      if(own?.present===0||cutoff(path.dirname(clean))>(own?.revision??applied))continue;
+      visible.set(clean,display);
+    }
+    // The prepared order breaks identical basenames with file IDs. A partial
+    // lookup has no final ID for new paths; delegate ties and later pages.
+    if(visible.size>limit)return;
+    const names=new Set<string>();
+    const rows=[...visible.entries()].map(([p,display])=>({p,display,key:path.basename(p).normalize('NFC').toLowerCase()}));
+    for(const row of rows){if(names.has(row.key))return;names.add(row.key);}
+    rows.sort((a,b)=>Buffer.compare(Buffer.from(a.key),Buffer.from(b.key)));
+    const properties=rows.map(({p,display})=>{
+      const s=splitPath(p);
+      const old=prepared.query('SELECT size,mtime,dir FROM files WHERE parent=(SELECT id FROM directories WHERE path=?) AND name=?').get(s.parent,s.name);
+      if((exact.get(...tables.flatMap(()=>[index,p]))?.revision??-1)>applied){
+        try{const stat=fs.statSync(p);return {path:stat.isDirectory()?display:p,size:stat.size,mtime:stat.mtimeMs,dir:Number(stat.isDirectory())};}
+        catch(e){if(!['ENOENT','ENOTDIR','EPERM','EACCES'].includes(e.code))throw e;}
+      }
+      return {path:display,size:old?.size??null,mtime:old?.mtime??null,dir:old?.dir??null};
+    });
+    const paths=properties.map(r=>r.path);
+    return {paths,properties,offset:0,nextOffset:null,snapshotId:source+':'+state.revision+':overlay:'+getMeta(prepared,'propertiesRevision'),
+      snapshot:true,engine:'sqlite-journal',complete:true,coverage:{matched:paths.length,metadataUnknown:0},
+      warnings:['Configured exclusions and macOS permissions apply.']};
+  }finally{if(prepared.inTransaction)prepared.exec('ROLLBACK');live.close();}
+}
+
 /** An interactive backlog page uses the newest bounded journal entries and an
  * indexed basename lookup. Every candidate is checked against the exact latest
  * path and ancestor barriers in the same read transaction. */
@@ -642,7 +738,12 @@ export function pendingFilenamePage(index:string,pq:ParsedQuery,limit:number,off
     for(const [clean,p] of candidates){
       const own=exact.get(...tables.flatMap(()=>[index,clean]));
       if(own?.present===0||cutoff(path.dirname(clean))>(own?.revision??pending.applied))continue;
-      heap.add(p);
+      let display=p;
+      if(p.endsWith('/')&&own?.revision>pending.applied){
+        try{if(!fs.statSync(clean).isDirectory())display=clean;}
+        catch(e){if(!['ENOENT','ENOTDIR','EPERM','EACCES'].includes(e.code))throw e;}
+      }
+      heap.add(display);
     }
     return {paths:heap.page(0),offset:0,nextOffset:null,snapshotId:pending.source+':'+pending.applied+':pending:'+state.revision,
       snapshot:true,engine:'sqlite-trigram',provisional:true,complete:false,coverage:{matched:null,metadataUnknown:null},

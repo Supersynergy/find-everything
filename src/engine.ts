@@ -10,6 +10,7 @@ import { once } from "events";
 import { acquireLock, BUILTIN_SCOPES, IndexOptions, profile, profiles, validateName } from "./catalog";
 import { MEDIA_FIELDS, NumericFilter, normalizeQuery, numericFilters } from "./smart-query";
 import { deltaFor } from "./delta";
+import {CloudScanDiagnostics} from './scan-diagnostics';
 import {recoverPublishedCompaction} from './compaction-recovery';
 
 export const HOME = os.homedir();
@@ -314,7 +315,9 @@ export function rebuildIndex(scope: Scope, opts: EngineOpts, monitor?: { progres
     const child = track(spawn(systemWalker ? "/usr/bin/find" : FD, systemWalker ? findArgs : args));
     child.stdout.setEncoding("utf8");
     let stderr = "";
-    child.stderr.on("data", d => { stderr = (stderr + d).slice(-2000); });
+    const diagnostics = new CloudScanDiagnostics(dirs, path.join(HOME, "Library", "CloudStorage"));
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (d: string) => { stderr = (stderr + d).slice(-2000); diagnostics.push(d); });
     // The progress supervisor enforces active time while its entire worker group can pause.
     const timer = monitor?.externalTimeout ? undefined : setTimeout(() => child.kill("SIGKILL"), INDEX_TIMEOUT_MS);
     monitor?.progress(stats);
@@ -336,7 +339,7 @@ export function rebuildIndex(scope: Scope, opts: EngineOpts, monitor?: { progres
       ...(stats.skipped ? [`Skipped ${stats.skipped} paths containing line breaks; coverage is incomplete.`] : []),
     ];
     const indexOptions={includeHidden:opts.includeHidden,includeIgnored:opts.includeIgnored,extraExcludes:opts.extraExcludes,indexMaxAgeMinutes:opts.indexMaxAgeMinutes,exhaustive:opts.exhaustive};
-    fs.writeFileSync(metaTmp, JSON.stringify({ signature: signature(scope, opts), ...stats, paths: dirs, indexOptions, scanStartedAt, indexedAt: new Date().toISOString(), provenanceWarnings }), { mode: 0o600 });
+    fs.writeFileSync(metaTmp, JSON.stringify({ signature: signature(scope, opts), ...stats, ...diagnostics.finish(), paths: dirs, indexOptions, scanStartedAt, indexedAt: new Date().toISOString(), provenanceWarnings }), { mode: 0o600 });
     // Finish both files before publishing the complete flat snapshot. Search preparation
     // is a separately resumable derived-cache stage, not an unfinished directory scan.
     fs.renameSync(tmp, file);

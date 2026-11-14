@@ -59,7 +59,8 @@ if(p.cursor<=cursor)return;cursor=p.cursor;console.log(JSON.stringify({...p,root
     assert(db.query('SELECT count(*) AS n FROM merge_queue').get().n>0,'create committed while merge still active');
     for(const scope of scopes){
       const result=run('search','name:during-merge view:all','--index',scope);
-      assert.equal(result.engine,scope==='prepared'?'sqlite-trigram':'complete-stream');
+      assert.equal(result.engine,scope==='prepared'?'sqlite-journal':'complete-stream');
+      assert.equal(result.coverage.matched,1);
       assert.deepEqual(result.paths,[late]);
       assert.deepEqual(run('search','name:obsolete view:all','--index',scope).paths,[]);
     }
@@ -74,6 +75,9 @@ if(p.cursor<=cursor)return;cursor=p.cursor;console.log(JSON.stringify({...p,root
     })();
     await until(()=>!db!.query("SELECT 1 FROM merge_queue WHERE scope='streaming'").get());
     assert.equal(db.query("SELECT count(*) AS n FROM merged_changes WHERE scope='streaming' AND revision=3").get().n,2001);
+    // The exact journal result leaves a partial revision in the prepared lookup.
+    assert.throws(()=>run('compact','--index','prepared','--rows','1'),/partially applied revision/);
+    assert.equal(run('prepare','--index','prepared').ready,true);
     assert.equal(run('compact','--index','prepared','--rows','1').resumable,true);
     fs.unlinkSync(special);send(2,[{path:special,flags:512}]);
     await until(()=>db!.query('SELECT cursor FROM streams WHERE root=?').get(root)?.cursor==='2');

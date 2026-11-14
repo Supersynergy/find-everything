@@ -1,0 +1,123 @@
+{
+  "method": "One created and removed filename, global index on Apple Silicon, normal socket APIs. Sequential phases and different naturally occurring journal loads.",
+  "installedBefore": {
+    "version": "0.3.47",
+    "passed": false,
+    "fileCreateToFSEventMs": 75,
+    "fileCreateToJournalMs": 11105,
+    "previewAfterJournalMs": 89,
+    "fullQueryAfterPreviewMs": 10003,
+    "fullQueryError": "Error: Socket request timed out",
+    "deleteToJournalMs": 16120,
+    "previewAfterDeleteMs": 91,
+    "fullQueryAfterDeleteMs": 10002,
+    "mergeStillQueuedAtPreview": false
+  },
+  "installedFinal": {
+    "version": "0.3.48",
+    "passed": true,
+    "fileCreateToFSEventMs": 107,
+    "fileCreateToJournalMs": 1491,
+    "previewAfterJournalMs": 103,
+    "fullQueryAfterPreviewMs": 28,
+    "fullQueryError": null,
+    "deleteToJournalMs": 1113,
+    "previewAfterDeleteMs": 25,
+    "fullQueryAfterDeleteMs": 22,
+    "mergeStillQueuedAtPreview": true
+  },
+  "isolatedInstalledRecovery": {
+    "passed": true,
+    "installed": "fe 0.3.48",
+    "missingFileFound": true,
+    "obsoleteFileRemoved": true,
+    "fsEventsSupplied": 0,
+    "home": "isolated local fixture",
+    "ms": 1209,
+    "pending": 0
+  },
+  "componentBenchmarks": {
+    "syntheticFold": {
+      "paths": 32768,
+      "before": [
+        {
+          "mode": "before",
+          "ms": 306.89591499999995,
+          "batchMaxMs": 63.465375,
+          "wal": 86165712,
+          "rows": 32768,
+          "barriers": 325
+        },
+        {
+          "mode": "before",
+          "ms": 314.37145699999996,
+          "batchMaxMs": 63.119,
+          "wal": 86165712,
+          "rows": 32768,
+          "barriers": 325
+        },
+        {
+          "mode": "before",
+          "ms": 329.199,
+          "batchMaxMs": 66.934084,
+          "wal": 86165712,
+          "rows": 32768,
+          "barriers": 325
+        }
+      ],
+      "after": [
+        {
+          "mode": "after",
+          "ms": 201.62654300000008,
+          "batchMaxMs": 53.474000000000004,
+          "wal": 53531192,
+          "rows": 32768,
+          "barriers": 325
+        },
+        {
+          "mode": "after",
+          "ms": 204.405751,
+          "batchMaxMs": 54.362583,
+          "wal": 53531192,
+          "rows": 32768,
+          "barriers": 325
+        },
+        {
+          "mode": "after",
+          "ms": 203.76824899999994,
+          "batchMaxMs": 56.292209,
+          "wal": 53531192,
+          "rows": 32768,
+          "barriers": 325
+        }
+      ]
+    },
+    "installedDataEightMediaPaths": {
+      "before": [
+        {
+          "baseline": true,
+          "paths": 8,
+          "visible": 8,
+          "ms": 8895.919375,
+          "rss": 5796680672
+        }
+      ],
+      "after": [
+        {
+          "baseline": false,
+          "paths": 8,
+          "visible": 8,
+          "ms": 0.9913340000000019,
+          "rss": 10797656
+        }
+      ]
+    }
+  },
+  "linuxPilot": {
+    "architecture": "arm64",
+    "libc": "musl",
+    "index": "isolated exhaustive snapshot",
+    "result": "matched hidden Unicode filename with prepared SQLite lookup",
+    "serverDeployment": false
+  }
+}

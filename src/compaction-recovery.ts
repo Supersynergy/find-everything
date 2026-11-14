@@ -78,6 +78,12 @@ export function recoverPublishedCompaction(file:string):void{
       for(const row of prepared.query('SELECT path FROM compact_specials').iterate())retain.run(name,row.path,state.watermark,...(merged?[name,row.path]:[]));
     }
     finally{prepared.close();}
+    // Compaction republishes the same scan. Its pending directory repairs and
+    // import receipts belong to the new publication as well.
+    if(scope.stamp!==state.publishedStamp && live.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='directory_retries'").get()){
+      live.query('UPDATE directory_retries SET stamp=?,generation=generation+1 WHERE scope=? AND stamp=?').run(state.publishedStamp,name,state.source);
+      live.query('UPDATE directory_retry_seeds SET stamp=? WHERE scope=? AND stamp=?').run(state.publishedStamp,name,state.source);
+    }
     live.query('UPDATE scopes SET stamp=? WHERE name=? AND stamp IN (?,?)').run(state.publishedStamp,name,state.source,state.publishedStamp);
     live.exec('COMMIT');
     state.phase='done';saveCompactionState(dir,state);fs.unlinkSync(intent);syncDirectory(dir);

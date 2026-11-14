@@ -11,7 +11,7 @@ import { liveRevisionFor, liveStatus } from "./delta";
 import { startLiveProcess } from "./live-process";
 import {defaultIndex} from './catalog';
 import {favoritesFile} from './file-filters';
-import { searchPrepared, searchStreaming, syncSearch, pendingFilenamePage, searchIndexPath,prepareSearch,indexProperties,preparedRevision } from './path-search';
+import { searchPrepared, searchStreaming, syncSearch, pendingFilenamePage, canReadPendingLiteral, exactPendingLiteral, searchIndexPath,prepareSearch,indexProperties,preparedRevision } from './path-search';
 import {SearchProcess,SearchWork,searchedCacheKey} from './search-process';
 import {SearchCache,preparedFileStamp} from './search-cache';
 import {learnedSelections,learningFile} from './search-learning';
@@ -21,7 +21,7 @@ import {searchContents,contentPath} from './content-search';
 import {searchMeaning,meaningPath} from './instantfind';
 import {instantEncoder} from './instantfind-worker';
 
-export const VERSION = "0.3.47";
+export const VERSION = "0.3.48";
 function learningStamp(){try{const s=fs.statSync(learningFile());return `${s.mtimeMs}:${s.size}:${Math.floor(Date.now()/3600000)}`;}catch(e){if(e.code==='ENOENT')return 'none';throw e;}}
 
 /** Adds the watcher and age envelope. It stays separate from the snapshot body so a
@@ -31,7 +31,7 @@ export function presentSearch(result:any,index:string) {
   const live = liveStatus(index);
   const info=indexStatus().find(i=>i.name===index),configurationChanged=info?.configurationChanged ?? false,provenanceWarnings=info?.provenanceWarnings ?? [];
   const healthy = live.watching && !live.problem && !configurationChanged;
-  const applied=result.engine==='sqlite-trigram'?String(result.snapshotId).match(/^[^:]+:[^:]+:(\d+):/)?.[1]:undefined;
+  const applied=['sqlite-trigram','sqlite-journal'].includes(result.engine)?String(result.snapshotId).match(/^[^:]+:[^:]+:(\d+):/)?.[1]:undefined;
   const pending=applied!==undefined&&Number(applied)<live.revision;
   return {...result,live,stale:pending?true:healthy ? false : result.stale,complete:result.complete && !pending && !live.problem && !configurationChanged && !provenanceWarnings.length,
     warnings:[...result.warnings.filter((w:string) => !healthy || !w.startsWith("Path snapshot is old")),...(pending?['Live changes are pending; results show the last committed snapshot.']:[]),...(live.problem ? [live.problem] : []),...(configurationChanged ? [`Index settings changed; searching the existing snapshot. Reconcile explicitly with fe index --index ${index}.`] : []),...provenanceWarnings]};
@@ -78,9 +78,15 @@ async function searchSnapshot(query: string, index: string, limit: number, optio
     // A live writer can hold the accelerator for a moment. Retrying a lock beats
     // every fallback: the complete snapshot means reading the whole index file.
     for (let attempt=0;;attempt++) {
-      try {const pending=synchronize?syncSearch(index,preview&&offset===0):undefined;
-        const page=pending&&pendingFilenamePage(index,parsed,limit,offset,pending);
-        if(page)return {query,normalizedQuery,index,...page,snapshotId:page.snapshotId+':relevance-v1:'+learningStamp(),warnings:[...page.warnings,...learningWarnings],stale:true,elapsedMs:Math.round(performance.now()-started)};
+      try {const selective=!preview&&canReadPendingLiteral(parsed,offset);
+        const pending=synchronize?syncSearch(index,(preview&&offset===0)||selective):undefined;
+        let page=pending&&(preview?pendingFilenamePage(index,parsed,limit,offset,pending):selective?exactPendingLiteral(index,parsed,limit,pending):undefined);
+        if(preview&&pending&&page&&page.paths.length<limit&&canReadPendingLiteral(parsed,offset)){
+          const verified=exactPendingLiteral(index,parsed,limit,pending,true);
+          if(verified)page={...page,paths:verified.paths,snapshotId:verified.snapshotId+':pending:preview'};
+        }
+        if(pending&&!page&&!preview)syncSearch(index);
+        if(page)return {query,normalizedQuery,index,...page,snapshotId:page.snapshotId+':relevance-v1:'+learningStamp(),warnings:[...page.warnings,...learningWarnings],stale:page.engine==='sqlite-journal'?Date.now()-fs.statSync(indexPathFor(index)).mtimeMs>Number(opts.indexMaxAgeMinutes)*60000:true,elapsedMs:Math.round(performance.now()-started)};
         prepared=searchPrepared(index,parsed,limit,offset,preview);acceleratorProblem=undefined;break;}
       catch(e){
         acceleratorProblem=`Fast lookup is unavailable; using the complete saved snapshot: ${String(e.message).slice(0,300)}`;
@@ -165,7 +171,7 @@ export function createApi(token: string, localSocket = false): http.Server & {ca
     // The child can synchronize before reading. Bind that returned snapshot to
     // the current key only when all non-snapshot dependencies stayed unchanged.
     const bound=data.engine==='sqlite-trigram'&&prepared&&prepared.live===current.liveRevision&&data[preparedFileStamp]===current.preparedStamp&&data.snapshotId.startsWith(`${prepared.source}:${prepared.live}:${prepared.properties}:`);
-    if(!data.snapshotId.includes(':pending:')&&!data.instantfind&&(bound&&searched&&JSON.parse(searched)[0]===current.dependencies||data.engine!=='sqlite-trigram'&&searched===current.key))cache.set(current.key,data);
+    if(data.engine!=='sqlite-journal'&&!data.snapshotId.includes(':pending:')&&!data.instantfind&&(bound&&searched&&JSON.parse(searched)[0]===current.dependencies||data.engine!=='sqlite-trigram'&&searched===current.key))cache.set(current.key,data);
     return { ...presentSearch({...data,query,normalizedQuery},index), cacheHit: false };
   };
   const server = http.createServer(async (req, res) => {

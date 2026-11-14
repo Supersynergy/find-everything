@@ -10,7 +10,9 @@
 
 Local-first file search for macOS. Find a filename across folders, combine precise filters, preview the result and get back to work. Native SwiftUI/AppKit app · JSON CLI · local API · MCP · optional Raycast extension.
 
-**New in 0.3.47:** `fe status` counts files with cached properties faster on sparsely populated indexes. Existing indexes require no rebuild.
+**New in 0.3.48:** The live watcher retries localized directory gaps and CloudStorage timeouts. Use `fe retries --index NAME` to inspect pending work.
+
+**0.3.47:** `fe status` counts files with cached properties faster on sparsely populated indexes. Existing indexes require no rebuild.
 
 **From 0.3.46:** automatic live journal consolidation and indexed reads of recent changes.
 
@@ -24,7 +26,7 @@ Local-first file search for macOS. Find a filename across folders, combine preci
 
 **From 0.3.40:** resume compaction of saved snapshots and journal changes, retain exact counts across search-process restarts for large indexes, and explicitly index scanned PDFs/images with local OCR. In Settings → Indexes, use **Merge saved changes (resume)** or **Index with local OCR**. Existing journal gaps require an explicit rebuild and remain visible after compaction. [Details and limits](docs/MAINTENANCE-0.3.40.md).
 
-[**Get the 0.3.47 preview**](https://github.com/Supersynergy/find-everything/releases/tag/v0.3.47) · [Features](#features) · [Search examples](#one-line-many-ways-to-find-it) · [Meaning search](docs/INSTANTFIND.md) · [Build from source](#build-from-source) · [CLI](#cli-quick-start) · [Privacy](#local-data-and-privacy) · [Release notes](docs/release/RELEASE-NOTES.md)
+[**Get the 0.3.48 preview**](https://github.com/Supersynergy/find-everything/releases/tag/v0.3.48) · [Features](#features) · [Search examples](#one-line-many-ways-to-find-it) · [Meaning search](docs/INSTANTFIND.md) · [Build from source](#build-from-source) · [CLI](#cli-quick-start) · [Privacy](#local-data-and-privacy) · [Release notes](docs/release/RELEASE-NOTES.md)
 
 > **Apple Silicon preview — not notarized.** The downloadable build is locally signed, not signed with a trusted Developer ID or Apple-notarized. Gatekeeper may refuse it. We do not recommend disabling Gatekeeper, removing quarantine or changing privacy permissions to bypass this. Build from source with your own signing identity, or wait for a notarized release. Intel and older macOS versions have not been verified.
 
@@ -179,7 +181,7 @@ These are rendered production views with fixture progress, not scans of personal
 
 The complete app archive requires **macOS 15 or later on Apple Silicon**; its native helper binaries target macOS 15. It was built and checked on macOS 15.8.2. The source app/CLI target alone is not the compatibility floor of the complete bundle.
 
-The [release page](https://github.com/Supersynergy/find-everything/releases/tag/v0.3.47) contains:
+The [release page](https://github.com/Supersynergy/find-everything/releases/tag/v0.3.48) contains:
 
 - `FindEverything.app.zip`: Apple Silicon app with its bundled CLI and native helpers.
 - `SHA256SUMS.txt`: archive and manifest checksums.

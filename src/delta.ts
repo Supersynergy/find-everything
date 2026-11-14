@@ -23,6 +23,9 @@ export function journalChanges(db:Database,scope:string,after:number) {
   if(hasMergedChanges(db)) queries.push(exact+'merged_changes'+range,'SELECT path,NULL AS present,1 AS tree,revision FROM tree_barriers'+range);
   return db.query(queries.join(' UNION ALL ')+' ORDER BY revision,path').iterate(...queries.flatMap(()=>[scope,after]));
 }
+// Fold neighboring paths together so adjacent transactions rewrite fewer of
+// the same B-tree pages. The cursor is a hint; committed rows are the checkpoint.
+const foldCursors = new WeakMap<Database,Map<string,{watermark:number;path:string}>>();
 /** A single durable, restartable batch. Rows and checkpoint commit together. */
 export function mergeLiveBatch(db:Database,scope:string) {
   const checkSpace=()=>{
@@ -34,7 +37,13 @@ export function mergeLiveBatch(db:Database,scope:string) {
   try {
     const pending=db.query('SELECT watermark FROM merge_queue WHERE scope=?').get(scope);
     if(!pending){db.exec('COMMIT');return 0;}
-    const rows=db.query('SELECT rowid,path,present,tree,revision FROM changes WHERE scope=? AND revision<=? ORDER BY revision LIMIT ?').all(scope,pending.watermark,LIVE_MERGE_BATCH);
+    let cursors=foldCursors.get(db);
+    if(!cursors){cursors=new Map();foldCursors.set(db,cursors);}
+    const previous=cursors.get(scope);
+    const after=previous?.watermark===pending.watermark ? previous.path : '';
+    // Bound the number of inspected paths even if younger rows fill this range.
+    const window=db.query('SELECT rowid,path,present,tree,revision FROM changes WHERE scope=? AND path>? ORDER BY path LIMIT ?').all(scope,after,LIVE_MERGE_BATCH);
+    const rows=window.filter(row=>row.revision<=pending.watermark);
     const merge=db.query('INSERT INTO merged_changes(scope,path,present,tree,revision) VALUES (?,?,?,?,?) ON CONFLICT(scope,path) DO UPDATE SET present=excluded.present,tree=excluded.tree,revision=excluded.revision WHERE excluded.revision>=merged_changes.revision');
     const barrier=db.query('INSERT INTO tree_barriers VALUES (?,?,?) ON CONFLICT(scope,path) DO UPDATE SET revision=max(revision,excluded.revision)');
     const remove=db.query('DELETE FROM changes WHERE rowid=?');
@@ -43,7 +52,8 @@ export function mergeLiveBatch(db:Database,scope:string) {
       merge.run(scope,row.path,row.present,row.tree,row.revision);
       remove.run(row.rowid);
     }
-    if(rows.length<LIVE_MERGE_BATCH){
+    const endOfRange=window.length<LIVE_MERGE_BATCH;
+    if(endOfRange && !db.query('SELECT 1 FROM changes WHERE scope=? AND revision<=? LIMIT 1').get(scope,pending.watermark)){
       // Writes beyond this watermark may have filled another generation.
       // Renew its checkpoint under the same lock as retiring the first one.
       const remaining=db.query('SELECT count(*) AS n FROM changes WHERE scope=?').get(scope).n;
@@ -51,7 +61,10 @@ export function mergeLiveBatch(db:Database,scope:string) {
       else db.query('DELETE FROM merge_queue WHERE scope=?').run(scope);
     }
     checkSpace();
-    db.exec('COMMIT');return rows.length;
+    db.exec('COMMIT');
+    if(endOfRange)cursors.delete(scope);
+    else cursors.set(scope,{watermark:pending.watermark,path:window[window.length-1].path});
+    return rows.length;
   }catch(error){if(db.inTransaction)db.exec('ROLLBACK');throw error;}
 }
 export function baseStamp(index: string): string { const file=indexPathFor(index);recoverPublishedCompaction(file);const s = fs.statSync(file); return `${s.mtimeMs}:${s.size}`; }
@@ -90,7 +103,9 @@ export function liveStatus(index: string) {
     let watching = false, statusUnknown = false;
     try { if(Number.isInteger(row.pid)&&row.pid>0){process.kill(row.pid, 0); watching = true;}else statusUnknown=true; }
     catch (e) { if (e.code === "EPERM") statusUnknown = true; else if (e.code !== "ESRCH") throw e; }
-    return { watching, statusUnknown, revision: row.revision, problem: row.problem, lastChange: row.lastChange,
+    const retryTable=db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='directory_retries'").get();
+    const directoryRetryPending=!!(retryTable&&db.query('SELECT 1 FROM directory_retries WHERE scope=? AND stamp=? LIMIT 1').get(index,row.stamp));
+    return { watching, statusUnknown, revision: row.revision, directoryRetryPending, problem: row.problem || (directoryRetryPending?'Targeted directory recovery pending':null), lastChange: row.lastChange,
       pending: db.query("SELECT count(*) AS n FROM jobs WHERE scope=?").get(index).n };
   } finally { db.close(); }
 }
@@ -132,4 +147,40 @@ export function deltaFor(index: string) {
     return own ? !!own.present : true;
   };
   return { revision, visible, additions: [...exact].filter(([p,r]) => r.present && visible(p)).map(([p]) => p).sort() };
+}
+
+/** Check a small change batch against a single journal snapshot without
+ * materializing millions of unrelated paths for an incremental media refresh. */
+export function visibleJournalPaths(index: string, paths: string[]): Set<string> {
+  const visible = new Set(paths);
+  if (!paths.length || !fs.existsSync(livePath())) return visible;
+  const db = new Database(livePath(), { readonly: true });
+  try {
+    db.exec('PRAGMA busy_timeout=1000; BEGIN');
+    const stamp = baseStamp(index);
+    const scope = db.query('SELECT stamp FROM scopes WHERE name=?').get(index);
+    if (baseStamp(index) !== stamp) throw new Error('Index changed during overlay read; retry');
+    if (scope?.stamp !== stamp) return visible;
+    const tables = hasMergedChanges(db) ? ['changes','merged_changes'] : ['changes'];
+    const exact = db.query(tables.map(t => 'SELECT present,revision FROM '+t+' WHERE scope=? AND path=?').join(' UNION ALL ')+' ORDER BY revision DESC LIMIT 1');
+    const trees = tables.map(t => 'SELECT revision FROM '+t+' WHERE scope=? AND path=? AND tree=1');
+    if (tables.length > 1) trees.push('SELECT revision FROM tree_barriers WHERE scope=? AND path=?');
+    const barrier = db.query(trees.join(' UNION ALL ')+' ORDER BY revision DESC LIMIT 1');
+    const cache = new Map<string,number>();
+    function cutoff(p: string): number {
+      const cached = cache.get(p);
+      if (cached !== undefined) return cached;
+      const here = barrier.get(...trees.flatMap(() => [index,p]))?.revision ?? 0;
+      const parent = path.dirname(p);
+      const value = p === parent ? here : Math.max(here,cutoff(parent));
+      cache.set(p,value);
+      return value;
+    }
+    for (const original of paths) {
+      const p = original.replace(/\/$/,'') || '/';
+      const own = exact.get(...tables.flatMap(() => [index,p]));
+      if (own?.present === 0 || (p !== '/' && cutoff(path.dirname(p)) > (own?.revision ?? 0))) visible.delete(original);
+    }
+    return visible;
+  } finally { db.close(); }
 }

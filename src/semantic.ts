@@ -6,7 +6,7 @@ import { INDEX_DIR, indexPathFor, ParsedQuery, parseQuery, matchesSize, compareS
 import { mediaPath } from "./media";
 import { MODEL_ID, SemanticWorker, semanticStatus } from "./semantic-worker";
 import { soundPlan } from "./smart-query";
-import { deltaFor } from "./delta";
+import { deltaFor, visibleJournalPaths } from "./delta";
 import {omitted} from './file-filters';
 
 export const semanticPath = (index: string) => path.join(INDEX_DIR, `sound-${validateName(index)}.sqlite`);
@@ -29,10 +29,11 @@ function candidates(index: string, pq: ParsedQuery, onlyPaths?: string[]): { row
     const s = fs.statSync(indexPathFor(index)), stamp = `${s.mtimeMs}:${s.size}`;
     const known = new Set(["duration", "sampleRate", "channels", "bitrate", "width", "height"]);
     if (pq.mediaFilters.some(f => !known.has(f.field) || !["<", ">", "<=", ">=", "="].includes(f.op) || !Number.isFinite(f.value))) throw new Error("Invalid sound predicate");
-    const delta = deltaFor(index);
     let rows = onlyPaths ? db.query("SELECT * FROM files WHERE kind='audio' AND status<>'excluded' AND path IN (SELECT value FROM json_each(?)) ORDER BY path").all(JSON.stringify(onlyPaths)) : db.query("SELECT * FROM files WHERE kind='audio' AND status<>'excluded' ORDER BY path").all();
     const favorites=pq.favorites?new Set(pq.favorites):null;
-    rows = rows.filter(r => delta.visible(r.path)&&(!favorites||favorites.has(r.path))&&!omitted(r.path,pq.omit));
+    const visible = onlyPaths ? visibleJournalPaths(index, rows.map(r => r.path)) : undefined;
+    const isVisible = visible ? (p: string) => visible.has(p) : deltaFor(index).visible;
+    rows = rows.filter(r => isVisible(r.path)&&(!favorites||favorites.has(r.path))&&!omitted(r.path,pq.omit));
     const constraints = pq.constraints.map(c => ({ re: new RegExp(c.pattern, "i"), negate: c.negate }));
     rows = rows.filter(r => constraints.every(c => c.re.test(r.path) !== c.negate) && pq.fuzzy.every(t => t.replace(/^'/, "").split("|").some(w => r.path.toLowerCase().includes(w.toLowerCase()))));
     if (pq.sizeFilter) rows = rows.filter(r => matchesSize(r.size,pq.sizeFilter));

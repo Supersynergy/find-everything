@@ -11,6 +11,7 @@ import { openLive, livePath, LIVE_PATH_LIMIT, liveMergeThreshold, mergeLiveBatch
 import { repairMedia, mediaPath } from "./media";
 import { refreshSounds } from "./semantic";
 import {recoverPublishedCompaction} from './compaction-recovery';
+import {initDirectoryRetries,eligibleDirectory,queueDirectory,recoverDirectory,seedScanDirectories} from './targeted-rescan';
 const exec = promisify(execFile);
 const under = (p: string, root: string) => p === root || p.startsWith(root.endsWith("/") ? root : root + "/");
 function excluded(p:string,root:string,patterns:string[]) {
@@ -26,6 +27,7 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
   const binary = helper(); if (!binary || process.platform !== "darwin") throw new Error("macOS fe-events helper is required for persistent incremental indexing");
   const release = acquireLock(livePath()+".lock"), db = openLive();
   db.query("UPDATE jobs SET failures=0,retryAt=0 WHERE failures>0").run();
+  initDirectoryRetries(db);
   let stopped = false, running = false, timer: ReturnType<typeof setTimeout> | undefined, jobsTimer: ReturnType<typeof setTimeout>;
   let child: ReturnType<typeof spawn>, lines: ReturnType<typeof createInterface>;
   let scopeList: ReturnType<typeof indexStatus> = [];
@@ -59,6 +61,23 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
   }
   // Repairs can enqueue a watermark through another connection while this watcher
   // is idle. A primary-key probe for each configured scope needs no journal write.
+  let recovering=false;
+  let recoveryIndex=0;
+  const retryTimer=setInterval(()=>{
+    if(stopped||recovering||!scopeList.length)return;
+    const scopes=scopeList;
+    for(let n=0;n<scopes.length;n++){
+      const scope=scopes[recoveryIndex++%scopes.length];
+      if(!db.query('SELECT 1 FROM directory_retries WHERE scope=? AND retryAt<=? LIMIT 1').get(scope.name,Date.now()))continue;
+      recovering=true;
+      void recoverDirectory(db,scope).catch(e=>console.error('fe: directory recovery: '+String(e.message).slice(0,200))).finally(()=>{
+        recovering=false;overlayCounts.clear();
+        if(stopped&&!running){db.close();release();}
+      });
+      break;
+    }
+  },1000);
+  retryTimer.unref();
   const discovery=setInterval(()=>{
     if(stopped)return;
     try{
@@ -82,7 +101,7 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
     }
   }
   const queue = new Map<string, { uuid?: string; cursor?: string; gap?: string; events: Map<string,Event> }>();
-  const stop = () => { if (stopped) return; stopped = true; clearTimeout(timer); clearTimeout(jobsTimer); clearTimeout(maintenance); clearInterval(discovery); child?.kill("SIGKILL"); lines?.close(); catalogWatch?.close(); indexWatch?.close(); if (!running) { db.close(); release(); } };
+  const stop = () => { if (stopped) return; stopped = true; clearTimeout(timer); clearTimeout(jobsTimer); clearTimeout(maintenance); clearInterval(discovery); clearInterval(retryTimer); child?.kill("SIGKILL"); lines?.close(); catalogWatch?.close(); indexWatch?.close(); if (!running&&!recovering) { db.close(); release(); } };
   process.once("exit",stop);
   let catalogWatch: fs.FSWatcher, indexWatch: fs.FSWatcher;
   const problem = (name: string, text: string) => db.query("UPDATE scopes SET problem=? WHERE name=? AND (problem IS NULL OR problem<>?)").run(text,name,text);
@@ -93,6 +112,12 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
       const rows = db.query("SELECT scope,path FROM jobs WHERE failures<3 AND retryAt<=? LIMIT 8").all(Date.now());
       for (const scope of new Set(rows.map(r => r.scope))) {
         const paths = rows.filter(r => r.scope === scope).map(r => r.path);
+        const cloud=path.join(HOME,'Library','CloudStorage');
+        for(let i=paths.length-1;i>=0;i--)if(under(paths[i],cloud)){
+          db.query('DELETE FROM jobs WHERE scope=? AND path=?').run(scope,paths[i]);
+          paths.splice(i,1);
+        }
+        if(!paths.length)continue;
         try {
           const r = await repairMedia(scope,8,4,paths);
           const sounds = !r.pending ? await refreshSounds(scope,paths) : undefined;
@@ -105,7 +130,7 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
       }
     } finally {
       running = false;
-      if (stopped) { db.close(); release(); }
+      if (stopped) { if(!recovering){db.close();release();} }
       else {
         scheduleFlush();
         if (db.query("SELECT 1 FROM jobs WHERE failures<3 LIMIT 1").get()) jobsTimer = setTimeout(() => void jobs(),1000);
@@ -135,11 +160,12 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
     }
   }
   async function subtree(p: string, scope: typeof scopeList[number]) {
-    const opts = scope.options, args = ["--absolute-path","--color=never","--print0","--threads","1"];
+    const opts = scope.options, args = ["--absolute-path","--color=never","--print0","--show-errors","--threads","1"];
     if (opts.includeHidden) args.push("--hidden"); if (opts.includeIgnored) args.push("--no-ignore");
     for (const e of scope.exclusions) args.push("--exclude",e);
     const task = exec(FD,[...args,"--","",p],{timeout:5000,maxBuffer:8*1024*1024,killSignal:"SIGKILL"}); track(task.child);
-    const paths = (await task).stdout.split("\0").filter(Boolean).map(x => x.replace(/\/$/,""));
+    const complete=await task;if(complete.stderr)throw Error('Subtree scanner reported an incomplete listing: '+complete.stderr.slice(-180));
+    const paths = complete.stdout.split("\0").filter(Boolean).map(x => x.replace(/\/$/,""));
     if (paths.length > 20000) throw new Error("Changed subtree exceeds 20000 paths; explicit reconciliation required");
     return paths;
   }
@@ -173,11 +199,12 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
       while(batch.length) {
         const [root,message]=batch[0];
         const affected = scopeList.filter(s => s.paths.includes(root));
-        const staged: {scope:typeof scopeList[number];changes:Map<string,{present:number;tree:number}>;gap?:string}[] = [];
+        const staged: {scope:typeof scopeList[number];changes:Map<string,{present:number;tree:number}>;retries:Set<string>;gap?:string}[] = [];
         const unique = message.events;
         for (const scope of affected) {
           let nextYield = performance.now()+25;
           const changes = new Map<string,{present:number;tree:number}>();
+          const retries=new Set<string>();
           let gap = message.gap;
           for (const event of unique.values()) {
             if (event.scopes && !(event.flags & (1|2|4|8|16|32|64|128)) && !event.scopes.includes(scope.name)) continue;
@@ -189,13 +216,30 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
             const p = event.path.replace(/\/$/,"") || "/", flags = event.flags;
             if (!path.isAbsolute(p) || !under(p,root)) { gap = "Invalid event path"; continue; }
             if (flags & (2|4|8|32|64|128)) { gap = "Filesystem journal gap/root change; explicit reconciliation required"; continue; }
+            // The provider may report an entire disconnected mount as absent.
+            // Only a successful parent listing can prove a cloud child vanished.
+            const cloud=path.join(HOME,'Library','CloudStorage');
+            if(under(p,cloud)){
+              if(flags&16)continue;
+              const provider=p.slice(cloud.length+1).split('/')[0];
+              if(!provider){gap='CloudStorage root changed; provider roots require verification';continue;}
+              const providerRoot=path.join(cloud,provider);
+              const target=(p===providerRoot || ((flags&1)&&!(flags&(512|2048))))?p:path.dirname(p);
+              if(eligibleDirectory(scope,target))retries.add(target);
+              continue;
+            }
             // MustScanSubDirs only asks for a fresh scan of that directory. Rescanning it
             // keeps the scope exact; marking it as drifted made every reconcile end in a
             // gap marker that only another full rebuild could have cleared.
             if (flags & 1) {
+              const configuredRoot=scope.paths.includes(p);
+              if(!(configuredRoot&&p!=='/')&&!eligibleDirectory(scope,p)){
+                if(scope.paths.includes(p))gap='Scope root requires explicit reconciliation';
+                continue;
+              }
               let directory = false;
-              try { directory = fs.lstatSync(p).isDirectory(); } catch (e) { if (e.code === "ENOENT" || e.code === "ENOTDIR") changes.set(p,{present:0,tree:1});else gap = `Cannot read changed path: ${e.code}`; }
-              if (directory) { try { await rescan(p,scope,changes); } catch (e) { gap = e.message; } }
+              try { directory = fs.lstatSync(p).isDirectory(); } catch (e) { if (e.code === "ENOENT" || e.code === "ENOTDIR") changes.set(p,{present:0,tree:1});else if(configuredRoot)gap='Configured root unavailable: '+e.code;else retries.add(p); }
+              if (directory) { try { await rescan(p,scope,changes); } catch (e) { if(configuredRoot)gap=String(e.message).slice(0,300);else retries.add(p); } }
               continue;
             }
             if (flags & 16 || !scope.paths.some(r => under(p,r))) continue; // HistoryDone
@@ -234,10 +278,10 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
             changes.set(p,{present:1,tree:0});
             if (stat.isDirectory()) {
               try { await rescan(p,scope,changes); }
-              catch (e) { gap = e.message; }
+              catch (e) { retries.add(p); }
             }
           }
-          staged.push({scope,changes,gap});
+          staged.push({scope,changes,retries,gap});
         }
         // Path deltas, durable metadata jobs and the shared root cursor commit together.
         const now = performance.now();
@@ -249,6 +293,10 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
           if (countsVersion !== version) { overlayCounts.clear(); countsVersion = version; }
           for (const item of staged) {
             const {scope,changes} = item;
+            if(item.retries.size){
+              const stamp=db.query('SELECT stamp FROM scopes WHERE name=?').get(scope.name).stamp;
+              for(const p of item.retries)queueDirectory(db,scope,p,stamp,'event');
+            }
             db.query("UPDATE scopes SET problem=NULL WHERE name=? AND problem LIKE 'Incremental update failed:%'").run(scope.name);
             let count = overlayCounts.get(scope.name);
             const revision = db.query("SELECT revision FROM scopes WHERE name=?").get(scope.name).revision + 1;
@@ -265,7 +313,7 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
               db.query(`INSERT INTO ${table} VALUES (?,?,?,?,?) ON CONFLICT(scope,path) DO UPDATE SET present=excluded.present,tree=excluded.tree,revision=excluded.revision`).run(scope.name,p,c.present,c.tree,revision);
               if(table==='merged_changes'&&(c.tree||old?.tree))db.query('INSERT INTO tree_barriers VALUES (?,?,?) ON CONFLICT(scope,path) DO UPDATE SET revision=max(revision,excluded.revision)').run(scope.name,p,c.tree?revision:old.revision);
               if(table==='changes'&&!hot)count++;
-              if (fs.existsSync(mediaPath(scope.name))) {
+              if (!under(p,path.join(HOME,'Library','CloudStorage')) && fs.existsSync(mediaPath(scope.name))) {
                 if (c.tree && !c.present) {
                   const media = new Database(mediaPath(scope.name),{readonly:true});
                   const prefix=p.replace(/\/$/,'')+'/';
@@ -282,7 +330,7 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
             db.query("UPDATE scopes SET revision=?,lastChange=? WHERE name=?").run(revision,new Date().toISOString(),scope.name);
             if (item.gap) problem(scope.name,item.gap);
           }
-          if ((staged.some(s => s.changes.size || s.gap) || historyDone || checkpointDue) && message.cursor && message.uuid) {
+          if ((staged.some(s => s.changes.size || s.retries.size || s.gap) || historyDone || checkpointDue) && message.cursor && message.uuid) {
             savedCursor = true;
             db.query("INSERT INTO streams VALUES (?,?,?) ON CONFLICT(root) DO UPDATE SET uuid=excluded.uuid,cursor=excluded.cursor WHERE cursor<>excluded.cursor OR uuid<>excluded.uuid").run(root,message.uuid,message.cursor);
           }
@@ -314,7 +362,7 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
       if(!stopped&&!timer)timer=setTimeout(()=>{timer=undefined;void flush();},1000); }
     finally {
       running = false;
-      if (stopped) { db.close(); release(); }
+      if (stopped) { if(!recovering){db.close();release();} }
       else {
         // Give pending metadata work a turn before a continuous stream starts the next flush.
         clearTimeout(jobsTimer);
@@ -338,10 +386,14 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
       const stat=fs.statSync(path.join(INDEX_DIR,`index-${s.name}.txt`));
       const stamp = `${stat.mtimeMs}:${stat.size}`, old = db.query("SELECT stamp FROM scopes WHERE name=?").get(s.name);
       if (old?.stamp !== stamp) {
-        for(const table of ['changes','merged_changes','tree_barriers','merge_queue'])db.query('DELETE FROM '+table+' WHERE scope=?').run(s.name); db.query("DELETE FROM jobs WHERE scope=?").run(s.name);
+        for(const table of ['changes','merged_changes','tree_barriers','merge_queue','directory_retries','directory_retry_seeds','directory_retry_providers'])db.query('DELETE FROM '+table+' WHERE scope=?').run(s.name); db.query("DELETE FROM jobs WHERE scope=?").run(s.name);
         for (const root of s.paths) db.query("DELETE FROM streams WHERE root=?").run(root);
       }
       db.query("INSERT INTO scopes(name,stamp,pid) VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET stamp=excluded.stamp,pid=excluded.pid,problem=CASE WHEN stamp<>excluded.stamp THEN NULL ELSE problem END").run(s.name,stamp,process.pid);
+      if(!s.configurationChanged&&!db.query("SELECT 1 FROM directory_retry_seeds WHERE scope=? AND stamp=? AND source='scan'").get(s.name,stamp)){
+        const meta=JSON.parse(fs.readFileSync(path.join(INDEX_DIR,'index-'+s.name+'.json'),'utf8'));
+        seedScanDirectories(db,s,stamp,'scan',Array.isArray(meta.retryDirectories)?meta.retryDirectories:[]);
+      }
       const count=db.query('SELECT count(*) AS n FROM changes WHERE scope=?').get(s.name).n;
       overlayCounts.set(s.name,count);
       if(db.query('SELECT 1 FROM merge_queue WHERE scope=?').get(s.name))mergeScopes.add(s.name);

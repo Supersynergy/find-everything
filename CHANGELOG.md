@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.48 — 2026-11-14
+
+- Retry localized filesystem gaps and CloudStorage timeouts through the active watcher. Failed listings retain their previous search results.
+- Check the paths in a media refresh batch against the journal by primary key. This avoids loading all pending paths into memory.
+- Merge nearby paths in the same transaction to reduce journal writes. Selective filename searches can read the prepared index and recent changes together.
+
 ## 0.3.47 — 2026-11-14
 
 - Speed up exact file-property counts on sparse indexes in `fe status`.
