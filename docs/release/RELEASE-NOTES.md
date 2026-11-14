@@ -1,7 +1,9 @@
-# Find Everything 0.3.44 · Apple Silicon preview
+# Find Everything 0.3.45 · Apple Silicon preview
 
-`fe explain` now reads saved metadata without counting property rows across the entire index. On the installed 69-million-path snapshot, the previous command exceeded a 20-second diagnostic timeout. The metadata-only command returns the property count as `null` with `propertiesCountExact:false`. The installed command completed in 30 ms; three Hyperfine runs averaged 29.4 ms. [Measurements](../benchmarks/2026-11-13/v0.3.44-summary.json). Exact property counts remain available to existing status callers. Search matching and indexed paths are unchanged.
+The live index now recognizes repeat notifications for an already deleted file. It keeps the original removal and avoids another write to the search journal. Directory removals still advance the revision because newer descendants can exist. Cache database names remain searchable. The watcher skips updates to the size and modification time of its own active SQLite files to avoid triggering more index writes.
 
-The previous release's bounded passage cache remains enabled. Existing scanner and journal gaps remain visible. At inspection the volume had only about 10 GiB free; the global path file occupies about 10 GB and its lookup about 28 GB. A full replacement needs more disk headroom. No original index files were removed.
+Event batches reuse the saved scope options and journal count. An external SQLite commit invalidates the count. Large batches yield to the event loop and continue processing their remaining paths. Existing journal gaps remain visible.
 
-This Apple Silicon preview requires macOS 15+. It is locally signed and not notarized. Intel and manual VoiceOver acceptance remain unverified.
+In a controlled macOS replay, 256 previously deleted files generated 3,072 duplicate notifications across 12 batches. The kernel attributed 2,170,880 bytes of disk writes to the watcher in 0.3.44 and 57,344 bytes in 0.3.45, including the final cursor checkpoint. Both versions retained all 256 removals. The comparison measures one workload. Physical NAND writes and SSD lifetime were outside the measurement.
+
+The preview requires an Apple Silicon Mac running macOS 15 or later. It is locally signed and not notarized.

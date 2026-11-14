@@ -6,8 +6,8 @@ import { promisify } from "util";
 import { createInterface } from "readline";
 import { Database } from "bun:sqlite";
 import { acquireLock, CONFIG_DIR } from "./catalog";
-import { scanExcludes, FD, HOME, INDEX_DIR, effectiveOptions, indexStatus, track } from "./engine";
-import { baseStamp, openLive, livePath, LIVE_PATH_LIMIT } from "./delta";
+import { FD, HOME, INDEX_DIR, indexStatus, track } from "./engine";
+import { openLive, livePath, LIVE_PATH_LIMIT } from "./delta";
 import { repairMedia, mediaPath } from "./media";
 import { refreshSounds } from "./semantic";
 import {recoverPublishedCompaction} from './compaction-recovery';
@@ -26,10 +26,14 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
   const binary = helper(); if (!binary || process.platform !== "darwin") throw new Error("macOS fe-events helper is required for persistent incremental indexing");
   const release = acquireLock(livePath()+".lock"), db = openLive();
   db.query("UPDATE jobs SET failures=0,retryAt=0 WHERE failures>0").run();
-  let stopped = false, running = false, timer: ReturnType<typeof setTimeout>, jobsTimer: ReturnType<typeof setTimeout>;
+  let stopped = false, running = false, timer: ReturnType<typeof setTimeout> | undefined, jobsTimer: ReturnType<typeof setTimeout>;
   let child: ReturnType<typeof spawn>, lines: ReturnType<typeof createInterface>;
   let scopeList: ReturnType<typeof indexStatus> = [];
   const siblings = new Map<string,Set<string>>();
+  const overlayCounts = new Map<string,number>();
+  let countsVersion = -1;
+  const cursorSavedAt = new Map<string,number>();
+  const priorChange = db.query('SELECT present FROM changes WHERE scope=? AND path=?');
   const queue = new Map<string, { uuid?: string; cursor?: string; gap?: string; events: Map<string,Event> }>();
   const stop = () => { if (stopped) return; stopped = true; clearTimeout(timer); clearTimeout(jobsTimer); child?.kill("SIGKILL"); lines?.close(); catalogWatch?.close(); indexWatch?.close(); if (!running) { db.close(); release(); } };
   process.once("exit",stop);
@@ -52,13 +56,20 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
         }
         if (!db.query("SELECT 1 FROM jobs WHERE scope=? LIMIT 1").get(scope)) db.query("UPDATE scopes SET problem=NULL WHERE name=? AND problem LIKE 'Metadata update pending:%'").run(scope);
       }
-    } finally { running = false; if (stopped) { db.close(); release(); } else if (db.query("SELECT 1 FROM jobs WHERE failures<3 LIMIT 1").get()) jobsTimer = setTimeout(() => void jobs(),1000); }
+    } finally {
+      running = false;
+      if (stopped) { db.close(); release(); }
+      else {
+        scheduleFlush();
+        if (db.query("SELECT 1 FROM jobs WHERE failures<3 LIMIT 1").get()) jobsTimer = setTimeout(() => void jobs(),1000);
+      }
+    }
   }
   async function accepted(p: string, scope: typeof scopeList[number]): Promise<boolean> {
-    const opts = effectiveOptions(scope.name), root = scope.paths.find(r => under(p,r));
+    const opts = scope.options, root = scope.paths.find(r => under(p,r));
     if (!root) return false;
     const relative = path.relative(root,p), parts = relative.split(path.sep);
-    const exclusions = scanExcludes(scope.name,opts);
+    const exclusions = scope.exclusions;
     if ((!opts.includeHidden && parts.some(s => s.startsWith("."))) || excluded(p,root,exclusions)) return false;
     if (opts.includeIgnored) return true;
     // fd evaluates the same inherited ignore rules; --max-depth prevents a subtree walk.
@@ -77,9 +88,9 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
     }
   }
   async function subtree(p: string, scope: typeof scopeList[number]) {
-    const opts = effectiveOptions(scope.name), args = ["--absolute-path","--color=never","--print0","--threads","1"];
+    const opts = scope.options, args = ["--absolute-path","--color=never","--print0","--threads","1"];
     if (opts.includeHidden) args.push("--hidden"); if (opts.includeIgnored) args.push("--no-ignore");
-    for (const e of scanExcludes(scope.name,opts)) args.push("--exclude",e);
+    for (const e of scope.exclusions) args.push("--exclude",e);
     const task = exec(FD,[...args,"--","",p],{timeout:5000,maxBuffer:8*1024*1024,killSignal:"SIGKILL"}); track(task.child);
     const paths = (await task).stdout.split("\0").filter(Boolean).map(x => x.replace(/\/$/,""));
     if (paths.length > 20000) throw new Error("Changed subtree exceeds 20000 paths; explicit reconciliation required");
@@ -101,9 +112,13 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
     changes.set(p,{present:scope.paths.includes(p)?0:1,tree:1});
     for(const sub of paths)changes.set(sub,{present:1,tree:0});
   }
+  function scheduleFlush() {
+    if (running || stopped || timer || !queue.size) return;
+    timer = setTimeout(() => { timer = undefined; void flush(); },delay);
+  }
   async function flush() {
     if (stopped) return;
-    if (running) { timer = setTimeout(() => void flush(),delay); return; }
+    if (running) return;
     running = true;
     siblings.clear();
     const batch = [...queue]; queue.clear();
@@ -113,12 +128,16 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
         const staged: {scope:typeof scopeList[number];changes:Map<string,{present:number;tree:number}>;gap?:string}[] = [];
         const unique = message.events;
         for (const scope of affected) {
-          const deadline = performance.now()+5000;
+          let nextYield = performance.now()+25;
           const changes = new Map<string,{present:number;tree:number}>();
           let gap = message.gap;
           for (const event of unique.values()) {
             if (event.scopes && !(event.flags & (1|2|4|8|16|32|64|128)) && !event.scopes.includes(scope.name)) continue;
-            if (performance.now()>deadline) { gap="Event processing budget exceeded; explicit reconciliation required"; break; }
+            if (performance.now() >= nextYield) {
+              await new Promise<void>(resolve => setImmediate(resolve));
+              if (stopped) return;
+              nextYield = performance.now()+25;
+            }
             const p = event.path.replace(/\/$/,"") || "/", flags = event.flags;
             if (!path.isAbsolute(p) || !under(p,root)) { gap = "Invalid event path"; continue; }
             if (flags & (2|4|8|32|64|128)) { gap = "Filesystem journal gap/root change; explicit reconciliation required"; continue; }
@@ -133,13 +152,14 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
             }
             if (flags & 16 || !scope.paths.some(r => under(p,r))) continue; // HistoryDone
             const relative = path.relative(scope.paths.find(r => under(p,r))!,p);
-            const exclusions = scanExcludes(scope.name,scope.options);
+            const exclusions = scope.exclusions;
             if ((!scope.options.includeHidden&&relative.split(path.sep).some(part=>part.startsWith('.'))) || excluded(p,scope.paths.find(r=>under(p,r))!,exclusions)) continue;
-            // Own count-cache metadata must not invalidate the snapshot that keyed it.
-            // Creation/removal/rename still index these filenames; no user path is hidden.
-            if(path.dirname(p)===INDEX_DIR&&/^counts-[a-zA-Z0-9_-]+\.sqlite(?:-journal)?$/.test(path.basename(p))&&!(flags&(256|512|2048)))continue;
-            if ([".gitignore",".ignore",".fdignore"].includes(path.basename(p))) {
-              if (scope.options.includeIgnored) continue;
+            // A lookup may update its own database on each query. Keep membership
+            // events, but do not feed its continuously changing properties back into it.
+            const membership = !!(flags & (256|512|2048));
+            if (!membership && path.dirname(p)===INDEX_DIR &&
+                /^(?:live|(?:counts|search|media|sound)-[a-zA-Z0-9_-]+)\.sqlite(?:-journal|-wal|-shm|\.lock)?$/.test(path.basename(p))) continue;
+            if (!scope.options.includeIgnored && [".gitignore",".ignore",".fdignore"].includes(path.basename(p))) {
               const baseline = scope.scanStartedAt ? Date.parse(scope.scanStartedAt) : Date.parse(scope.indexedAt || "")-120000;
               if (!fs.existsSync(p) || fs.statSync(p).mtimeMs >= baseline) gap = "Ignore rules changed; explicit reconciliation required";
               continue;
@@ -170,15 +190,33 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
               catch (e) { gap = e.message; }
             }
           }
-          const count = db.query("SELECT count(*) AS n FROM changes WHERE scope=?").get(scope.name).n;
-          let newPaths=0;
-          for(const p of changes.keys())if(!db.query('SELECT 1 FROM changes WHERE scope=? AND path=?').get(scope.name,p))newPaths++;
-          if (count + newPaths > LIVE_PATH_LIMIT) { gap = `Incremental overlay exceeds ${LIVE_PATH_LIMIT} paths; explicit compaction required`; changes.clear(); }
           staged.push({scope,changes,gap});
         }
         // Path deltas, durable metadata jobs and the shared root cursor commit together.
+        const now = performance.now();
+        const historyDone = [...message.events.values()].some(e => e.flags & 16);
+        const checkpointDue = now - (cursorSavedAt.get(root) ?? 0) >= 60_000;
+        let savedCursor = false;
         db.transaction(() => {
-          for (const {scope,changes,gap} of staged) {
+          const version = db.query('PRAGMA data_version').get().data_version;
+          if (countsVersion !== version) { overlayCounts.clear(); countsVersion = version; }
+          for (const item of staged) {
+            const {scope,changes} = item;
+            let newPaths = 0;
+            for (const [p,c] of changes) {
+              const old = priorChange.get(scope.name,p);
+              // Tree removals still need a fresh revision to cover later descendants.
+              if (!c.present && !c.tree && old?.present === 0) changes.delete(p);
+              else if (!old) newPaths++;
+            }
+            if (newPaths) {
+              const count = overlayCounts.get(scope.name) ?? db.query('SELECT count(*) AS n FROM changes WHERE scope=?').get(scope.name).n;
+              if (count + newPaths > LIVE_PATH_LIMIT) {
+                item.gap = `Incremental overlay exceeds ${LIVE_PATH_LIMIT} paths; explicit compaction required`;
+                changes.clear();
+              } else overlayCounts.set(scope.name,count+newPaths);
+            }
+            if (!changes.size) { if (item.gap) problem(scope.name,item.gap); continue; }
             const revision = db.query("SELECT revision FROM scopes WHERE name=?").get(scope.name).revision + 1;
             for (const [p,c] of changes) {
               db.query("INSERT INTO changes VALUES (?,?,?,?,?) ON CONFLICT(scope,path) DO UPDATE SET present=excluded.present,tree=excluded.tree,revision=excluded.revision").run(scope.name,p,c.present,c.tree,revision);
@@ -191,11 +229,15 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
                 if (/\.(mp3|wav|aac|flac|m4a|ogg|opus|aiff?|caf|wma|mp4|m4v|mov|mkv|png|jpe?g|webp)$/i.test(p)) db.query("INSERT INTO jobs(scope,path) VALUES (?,?) ON CONFLICT(scope,path) DO UPDATE SET failures=0,retryAt=0").run(scope.name,p);
               }
             }
-            if (changes.size) db.query("UPDATE scopes SET revision=?,lastChange=? WHERE name=?").run(revision,new Date().toISOString(),scope.name);
-            if (gap) problem(scope.name,gap);
+            db.query("UPDATE scopes SET revision=?,lastChange=? WHERE name=?").run(revision,new Date().toISOString(),scope.name);
+            if (item.gap) problem(scope.name,item.gap);
           }
-          if ((staged.some(s => s.changes.size || s.gap) || [...message.events.values()].some(e => e.flags & 16)) && message.cursor && message.uuid) db.query("INSERT INTO streams VALUES (?,?,?) ON CONFLICT(root) DO UPDATE SET uuid=excluded.uuid,cursor=excluded.cursor WHERE cursor<>excluded.cursor OR uuid<>excluded.uuid").run(root,message.uuid,message.cursor);
+          if ((staged.some(s => s.changes.size || s.gap) || historyDone || checkpointDue) && message.cursor && message.uuid) {
+            savedCursor = true;
+            db.query("INSERT INTO streams VALUES (?,?,?) ON CONFLICT(root) DO UPDATE SET uuid=excluded.uuid,cursor=excluded.cursor WHERE cursor<>excluded.cursor OR uuid<>excluded.uuid").run(root,message.uuid,message.cursor);
+          }
         })();
+        if (savedCursor) cursorSavedAt.set(root,now);
         for (const {scope,changes} of staged) {
           if (changes.size) {
             try {if(canSyncSearch())syncSearch(scope.name);}catch(e){console.error(`fe: fast lookup will catch up on query: ${String(e.message).slice(0,300)}`);}
@@ -203,10 +245,20 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
           }
         }
       }
-    } catch (e) { for (const s of scopeList) problem(s.name,`Incremental update failed: ${e.message}`); }
-    finally { running = false; if (stopped) { db.close(); release(); } else { if (queue.size) timer = setTimeout(() => void flush(),delay); jobsTimer = setTimeout(() => void jobs(),delay); } }
+    } catch (e) { overlayCounts.clear(); for (const s of scopeList) problem(s.name,`Incremental update failed: ${e.message}`); }
+    finally {
+      running = false;
+      if (stopped) { db.close(); release(); }
+      else {
+        // Give pending metadata work a turn before a continuous stream starts the next flush.
+        clearTimeout(jobsTimer);
+        jobsTimer = setTimeout(() => void jobs(),delay);
+        scheduleFlush();
+      }
+    }
   }
   function configure() {
+    overlayCounts.clear();
     child?.kill("SIGKILL"); lines?.close();
     scopeList = indexStatus().filter(s => s.exists && (!names || names.includes(s.name)));
     const roots = [...new Set(scopeList.flatMap(s => s.paths))];
@@ -233,7 +285,7 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
       const since = Math.min(...targets.map(t=>t.since));
       // A shared watcher may suppress only exclusions common to every target.
       // Root/path-specific rules remain in the per-index event filter.
-      const exclusions=scopeList.filter(s=>s.paths.includes(root)).map(s=>scanExcludes(s.name,s.options));
+      const exclusions=scopeList.filter(s=>s.paths.includes(root)).map(s=>s.exclusions);
       const common=exclusions[0].filter(e=>!e.includes('/')&&exclusions.every(rules=>rules.includes(e)));
       return { path:root,since,...old,targets,excludes:common };
     });
@@ -264,7 +316,7 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
         if (events.size > 20000) { events.clear(); m.gap="Event backlog exceeds budget; explicit reconciliation required"; }
         queue.set(m.root,{uuid:m.uuid,cursor:m.cursor || previous?.cursor,gap:m.gap || previous?.gap,events});
         // Schedule from the first event; continuous filesystem activity must not starve commits.
-        if (!previous) timer=setTimeout(() => void flush(),delay);
+        scheduleFlush();
       } catch (e) { for (const s of scopeList) problem(s.name,e.message); }
     });
     jobsTimer = setTimeout(() => void jobs(),delay);

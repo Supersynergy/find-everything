@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.45 — 2026-11-14
+
+- Coalesce repeat file removals and skip property refreshes for the watcher's own databases. Preserve membership changes, directory tombstones and ordinary file metadata.
+- Cache per-scope options and journal counts, continue large event batches across event-loop yields, and checkpoint otherwise quiet streams at most once a minute during activity.
+
 ## 0.3.44 — 2026-11-13
 
 - Keep `fe explain` metadata-only by skipping the full property-count scan. Report the count as unknown with an explicit exactness flag; retain exact status counting for existing callers.

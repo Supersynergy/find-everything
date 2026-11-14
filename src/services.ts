@@ -21,7 +21,7 @@ import {searchContents,contentPath} from './content-search';
 import {searchMeaning,meaningPath} from './instantfind';
 import {instantEncoder} from './instantfind-worker';
 
-export const VERSION = "0.3.44";
+export const VERSION = "0.3.45";
 function learningStamp(){try{const s=fs.statSync(learningFile());return `${s.mtimeMs}:${s.size}:${Math.floor(Date.now()/3600000)}`;}catch(e){if(e.code==='ENOENT')return 'none';throw e;}}
 
 /** Adds the watcher and age envelope. It stays separate from the snapshot body so a
