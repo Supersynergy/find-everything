@@ -67,10 +67,16 @@ export function recoverPublishedCompaction(file:string):void{
     swap(path.join(dir,'metadata.json'),metadata,path.join(dir,'previous.metadata.json'));
     syncDirectory(dir);syncDirectory(path.dirname(file));
     const now=fs.statSync(file);if(`${now.mtimeMs}:${now.size}`!==state.publishedStamp)throw new Error('Compaction target changed during recovery');
-    live.query('DELETE FROM changes WHERE scope=? AND revision<=?').run(name,state.watermark);
+    const merged=!!live.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='merged_changes'").get();
+    for(const table of merged?['changes','merged_changes','tree_barriers']:['changes']){
+      live.query('DELETE FROM '+table+' WHERE scope=? AND revision<=?').run(name,state.watermark);
+    }
     // Line-delimited snapshots cannot encode CR/LF paths; retain them in the overlay.
     const prepared=new Database(lookup,{readonly:true});
-    try{for(const row of prepared.query('SELECT path FROM compact_specials').iterate())live.query('INSERT OR IGNORE INTO changes(scope,path,present,tree,revision) VALUES (?,?,1,0,?)').run(name,row.path,state.watermark);}
+    try{
+      const retain=live.query('INSERT OR IGNORE INTO changes(scope,path,present,tree,revision) SELECT ?,?,1,0,?'+(merged?' WHERE NOT EXISTS (SELECT 1 FROM merged_changes WHERE scope=? AND path=?)':''));
+      for(const row of prepared.query('SELECT path FROM compact_specials').iterate())retain.run(name,row.path,state.watermark,...(merged?[name,row.path]:[]));
+    }
     finally{prepared.close();}
     live.query('UPDATE scopes SET stamp=? WHERE name=? AND stamp IN (?,?)').run(state.publishedStamp,name,state.source,state.publishedStamp);
     live.exec('COMMIT');

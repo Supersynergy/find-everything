@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.46 — 2026-11-14
+
+- Consolidate pending path changes during live indexing and index recent changes by scope and revision.
+- Batch durable flat-export checkpoints across multiple read pages.
+
 ## 0.3.45 — 2026-11-14
 
 - Coalesce repeat file removals and skip property refreshes for the watcher's own databases. Preserve membership changes, directory tombstones and ordinary file metadata.

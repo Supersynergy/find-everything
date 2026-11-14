@@ -1,5 +1,5 @@
 export function completions(shell: string): string {
-  const commands = "search explain favorites index indexes status watch prepare compact reconcile combine properties enrich repair-media semantic query-help open reveal preview completions serve mcp help";
+  const commands = "search explain favorites index indexes status watch prepare journal compact reconcile combine properties enrich repair-media semantic query-help open reveal preview completions serve mcp help";
   if (shell === "bash") return `_fe() {
   local cur="\${COMP_WORDS[COMP_CWORD]}" prev="\${COMP_WORDS[COMP_CWORD-1]}"
   case "$prev" in

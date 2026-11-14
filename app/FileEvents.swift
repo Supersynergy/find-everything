@@ -27,9 +27,13 @@ func emit(_ data: [String: Any]) {
 func under(_ path: String, _ root: String) -> Bool { path == root || path.hasPrefix(root == "/" ? "/" : root + "/") }
 func tail(_ watched: Watched, _ reason: String) {
   guard watched.history else { return }; watched.history=false
-  emit(["root":watched.root,"uuid":watched.uuid,"cursor":String(FSEventsGetCurrentEventId()),"gap":reason])
+  // A relative-to-device stream must resume with an ID from the same device.
+  let checkpoint = FSEventsGetLastEventIdForDeviceBeforeTime(watched.device, Date().timeIntervalSince1970)
+  var notice: [String:Any] = ["root":watched.root,"uuid":watched.uuid,"gap":reason]
+  if checkpoint != 0 { notice["cursor"] = String(checkpoint) }
+  emit(notice)
   if let old=watched.stream { FSEventStreamStop(old); FSEventStreamInvalidate(old); FSEventStreamRelease(old); watched.stream=nil }
-  if !start(watched,UInt64(kFSEventStreamEventIdSinceNow)) { emit(["root":watched.root,"gap":"Cannot start current event stream"]) }
+  if !start(watched,checkpoint == 0 ? UInt64(kFSEventStreamEventIdSinceNow) : checkpoint) { emit(["root":watched.root,"gap":"Cannot start current event stream"]) }
 }
 let callback: FSEventStreamCallback = { _, context, count, raw, flags, ids in
   let w = Unmanaged<Watched>.fromOpaque(context!).takeUnretainedValue()

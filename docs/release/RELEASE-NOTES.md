@@ -1,9 +1,11 @@
-# Find Everything 0.3.45 · Apple Silicon preview
+# Find Everything 0.3.46 · Apple Silicon preview
 
-The live index now recognizes repeat notifications for an already deleted file. It keeps the original removal and avoids another write to the search journal. Directory removals still advance the revision because newer descendants can exist. Cache database names remain searchable. The watcher skips updates to the size and modification time of its own active SQLite files to avoid triggering more index writes.
+The watcher consolidates pending filesystem events in SQLite while searches continue. Consolidation preserves newer events and directory-removal revisions. Run `fe journal --index everything` to see pending and consolidated row counts, the current watermark, and any outstanding coverage warning. The default threshold is 750,000 pending paths. The watcher moves up to 2,048 rows per transaction and resumes from a saved revision after a restart, including for indexes without a prepared lookup. To request an earlier merge, run `fe journal merge --index everything`.
 
-Event batches reuse the saved scope options and journal count. An external SQLite commit invalidates the count. Large batches yield to the event loop and continue processing their remaining paths. Existing journal gaps remain visible.
+Recent-change reads now use a scope and revision index. A seven-run Hyperfine benchmark fetched the latest 256 of 320,000 paths in 9.8 ms on average, including process startup. The previous layout took 31.3 ms. The additional index increased the fixture database size from 56.0 to 63.6 MiB. [Benchmark results](../benchmarks/2026-11-14/v0.3.46-summary.json).
 
-In a controlled macOS replay, 256 previously deleted files generated 3,072 duplicate notifications across 12 batches. The kernel attributed 2,170,880 bytes of disk writes to the watcher in 0.3.44 and 57,344 bytes in 0.3.45, including the final cursor checkpoint. Both versions retained all 256 removals. The comparison measures one workload. Physical NAND writes and SSD lifetime were outside the measurement.
+When a bulk repair leaves the filename lookup behind, the first-page filename preview can return provisional results while the remaining revisions are applied. The result identifies pending counts and pagination.
 
-The preview requires an Apple Silicon Mac running macOS 15 or later. It is locally signed and not notarized.
+Explicit flat-snapshot exports now checkpoint after roughly 16 MiB and at the end of each work slice. A 150,000-path export wrote four checkpoints, down from 40, with identical output bytes.
+
+This Apple Silicon preview requires macOS 15 or later. It is locally signed and not notarized.

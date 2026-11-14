@@ -7,7 +7,7 @@ import { createInterface } from "readline";
 import { Database } from "bun:sqlite";
 import { acquireLock, CONFIG_DIR } from "./catalog";
 import { FD, HOME, INDEX_DIR, indexStatus, track } from "./engine";
-import { openLive, livePath, LIVE_PATH_LIMIT } from "./delta";
+import { openLive, livePath, LIVE_PATH_LIMIT, liveMergeThreshold, mergeLiveBatch } from "./delta";
 import { repairMedia, mediaPath } from "./media";
 import { refreshSounds } from "./semantic";
 import {recoverPublishedCompaction} from './compaction-recovery';
@@ -33,9 +33,56 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
   const overlayCounts = new Map<string,number>();
   let countsVersion = -1;
   const cursorSavedAt = new Map<string,number>();
-  const priorChange = db.query('SELECT present FROM changes WHERE scope=? AND path=?');
+  const threshold=liveMergeThreshold();
+  let maintenance:ReturnType<typeof setTimeout>|undefined;
+  const mergeScopes=new Set<string>();
+  function scheduleMerge(wait=25){
+    if(stopped||maintenance||!mergeScopes.size)return;
+    maintenance=setTimeout(()=>{
+      maintenance=undefined;
+      const name=mergeScopes.values().next().value;
+      if(!name)return;
+      mergeScopes.delete(name);
+      try{
+        const removed=mergeLiveBatch(db,name);
+        const cached=overlayCounts.get(name);
+        if(cached!==undefined)overlayCounts.set(name,Math.max(0,cached-removed));
+        if(db.query('SELECT 1 FROM merge_queue WHERE scope=?').get(name))mergeScopes.add(name);
+
+      }catch(e){
+        mergeScopes.add(name);
+        console.error('fe: '+String(e.message).slice(0,300));
+        scheduleMerge(30000);return;
+      }
+      scheduleMerge();
+    },wait);
+  }
+  // Repairs can enqueue a watermark through another connection while this watcher
+  // is idle. A primary-key probe for each configured scope needs no journal write.
+  const discovery=setInterval(()=>{
+    if(stopped)return;
+    try{
+      for(const scope of scopeList)if(db.query('SELECT 1 FROM merge_queue WHERE scope=?').get(scope.name))mergeScopes.add(scope.name);
+      scheduleMerge();
+    }catch(e){console.error('fe: could not read pending live merges: '+String(e.message).slice(0,300));}
+  },5000);discovery.unref();
+  const markMerge=(name:string,revision:number)=>{
+    db.query('INSERT OR IGNORE INTO merge_queue VALUES (?,?)').run(name,revision);
+    mergeScopes.add(name);
+  };
+  const priorChange = db.query('SELECT present,revision,tree FROM changes WHERE scope=? AND path=?');
+  const mergedChange=db.query('SELECT present,revision,tree FROM merged_changes WHERE scope=? AND path=?');
+  const newestBarrier=db.query('SELECT revision FROM tree_barriers WHERE scope=? AND path=? UNION ALL SELECT revision FROM changes WHERE scope=? AND path=? AND tree=1 ORDER BY revision DESC LIMIT 1');
+  function alreadyPresent(scope:string,p:string) {
+    const prior=priorChange.get(scope,p)??mergedChange.get(scope,p);
+    if(!prior?.present)return false;
+    for(let parent=path.dirname(p);;parent=path.dirname(parent)){
+      if((newestBarrier.get(scope,parent,scope,parent)?.revision??-1)>prior.revision)return false;
+      if(parent===path.dirname(parent))return true;
+    }
+  }
   const queue = new Map<string, { uuid?: string; cursor?: string; gap?: string; events: Map<string,Event> }>();
-  const stop = () => { if (stopped) return; stopped = true; clearTimeout(timer); clearTimeout(jobsTimer); child?.kill("SIGKILL"); lines?.close(); catalogWatch?.close(); indexWatch?.close(); if (!running) { db.close(); release(); } };
+  const stop = () => { if (stopped) return; stopped = true; clearTimeout(timer); clearTimeout(jobsTimer); clearTimeout(maintenance); clearInterval(discovery); child?.kill("SIGKILL"); lines?.close(); catalogWatch?.close(); indexWatch?.close(); if (!running) { db.close(); release(); } };
   process.once("exit",stop);
   let catalogWatch: fs.FSWatcher, indexWatch: fs.FSWatcher;
   const problem = (name: string, text: string) => db.query("UPDATE scopes SET problem=? WHERE name=? AND (problem IS NULL OR problem<>?)").run(text,name,text);
@@ -123,7 +170,8 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
     siblings.clear();
     const batch = [...queue]; queue.clear();
     try {
-      for (const [root, message] of batch) {
+      while(batch.length) {
+        const [root,message]=batch[0];
         const affected = scopeList.filter(s => s.paths.includes(root));
         const staged: {scope:typeof scopeList[number];changes:Map<string,{present:number;tree:number}>;gap?:string}[] = [];
         const unique = message.events;
@@ -170,12 +218,11 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
             let stat: fs.Stats | undefined;
             try { stat = fs.lstatSync(p); } catch (e) { if (e.code !== "ENOENT" && e.code !== "ENOTDIR") { gap = `Cannot read changed path: ${e.code}`; continue; } }
             if (!stat) { changes.set(p,{present:0,tree:flags & 131072 ? 1 : 0}); continue; }
-            const prior = db.query("SELECT present FROM changes WHERE scope=? AND path=?").get(scope.name,p);
             if(propertyChange&&!(flags & (256|512|2048))){
               try {const old=cachedFileProperties(scope.name,p);const current=stat.isSymbolicLink()?fs.statSync(p):stat;if(old?.size===current.size&&old?.mtime===current.mtimeMs&&old?.dir===Number(current.isDirectory()))continue;}
               catch(e){gap=`File property cache pending: ${String(e.message).slice(0,300)}`;}
             }
-            if (!stat.isDirectory() && !media && prior?.present === 1 && !propertyChange) continue;
+            if (!stat.isDirectory() && !media && !propertyChange && alreadyPresent(scope.name,p)) continue;
             let included=false;
             try {included=await accepted(p,scope);} catch(e) {gap=`Ignore check failed for ${scope.name}: ${String(e.message).slice(0,500)}`;continue;}
             if(!included){
@@ -202,24 +249,22 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
           if (countsVersion !== version) { overlayCounts.clear(); countsVersion = version; }
           for (const item of staged) {
             const {scope,changes} = item;
-            let newPaths = 0;
-            for (const [p,c] of changes) {
-              const old = priorChange.get(scope.name,p);
-              // Tree removals still need a fresh revision to cover later descendants.
-              if (!c.present && !c.tree && old?.present === 0) changes.delete(p);
-              else if (!old) newPaths++;
-            }
-            if (newPaths) {
-              const count = overlayCounts.get(scope.name) ?? db.query('SELECT count(*) AS n FROM changes WHERE scope=?').get(scope.name).n;
-              if (count + newPaths > LIVE_PATH_LIMIT) {
-                item.gap = `Incremental overlay exceeds ${LIVE_PATH_LIMIT} paths; explicit compaction required`;
-                changes.clear();
-              } else overlayCounts.set(scope.name,count+newPaths);
-            }
-            if (!changes.size) { if (item.gap) problem(scope.name,item.gap); continue; }
+            db.query("UPDATE scopes SET problem=NULL WHERE name=? AND problem LIKE 'Incremental update failed:%'").run(scope.name);
+            let count = overlayCounts.get(scope.name);
             const revision = db.query("SELECT revision FROM scopes WHERE name=?").get(scope.name).revision + 1;
             for (const [p,c] of changes) {
-              db.query("INSERT INTO changes VALUES (?,?,?,?,?) ON CONFLICT(scope,path) DO UPDATE SET present=excluded.present,tree=excluded.tree,revision=excluded.revision").run(scope.name,p,c.present,c.tree,revision);
+              const hot=priorChange.get(scope.name,p);
+              const old=hot??mergedChange.get(scope.name,p);
+              if(!c.present&&!c.tree&&old?.present===0){changes.delete(p);continue;}
+              // Keep the subtree watermark when a later exact event replaces this row.
+              if(hot?.tree&&!c.tree)db.query('INSERT INTO tree_barriers VALUES (?,?,?) ON CONFLICT(scope,path) DO UPDATE SET revision=max(revision,excluded.revision)').run(scope.name,p,hot.revision);
+              count??=db.query('SELECT count(*) AS n FROM changes WHERE scope=?').get(scope.name).n as number;
+              // A large packet can arrive at the cap between maintenance ticks.
+              // Write new paths straight into the durable layer in this transaction.
+              const table=count>=LIVE_PATH_LIMIT&&!hot?'merged_changes':'changes';
+              db.query(`INSERT INTO ${table} VALUES (?,?,?,?,?) ON CONFLICT(scope,path) DO UPDATE SET present=excluded.present,tree=excluded.tree,revision=excluded.revision`).run(scope.name,p,c.present,c.tree,revision);
+              if(table==='merged_changes'&&(c.tree||old?.tree))db.query('INSERT INTO tree_barriers VALUES (?,?,?) ON CONFLICT(scope,path) DO UPDATE SET revision=max(revision,excluded.revision)').run(scope.name,p,c.tree?revision:old.revision);
+              if(table==='changes'&&!hot)count++;
               if (fs.existsSync(mediaPath(scope.name))) {
                 if (c.tree && !c.present) {
                   const media = new Database(mediaPath(scope.name),{readonly:true});
@@ -229,6 +274,11 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
                 if (/\.(mp3|wav|aac|flac|m4a|ogg|opus|aiff?|caf|wma|mp4|m4v|mov|mkv|png|jpe?g|webp)$/i.test(p)) db.query("INSERT INTO jobs(scope,path) VALUES (?,?) ON CONFLICT(scope,path) DO UPDATE SET failures=0,retryAt=0").run(scope.name,p);
               }
             }
+            if(count!==undefined){
+              overlayCounts.set(scope.name,count);
+              if(count>=threshold)markMerge(scope.name,revision);
+            }
+            if (!changes.size) { if (item.gap) problem(scope.name,item.gap); continue; }
             db.query("UPDATE scopes SET revision=?,lastChange=? WHERE name=?").run(revision,new Date().toISOString(),scope.name);
             if (item.gap) problem(scope.name,item.gap);
           }
@@ -237,6 +287,8 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
             db.query("INSERT INTO streams VALUES (?,?,?) ON CONFLICT(root) DO UPDATE SET uuid=excluded.uuid,cursor=excluded.cursor WHERE cursor<>excluded.cursor OR uuid<>excluded.uuid").run(root,message.uuid,message.cursor);
           }
         })();
+        batch.shift();
+        scheduleMerge();
         if (savedCursor) cursorSavedAt.set(root,now);
         for (const {scope,changes} of staged) {
           if (changes.size) {
@@ -245,7 +297,21 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
           }
         }
       }
-    } catch (e) { overlayCounts.clear(); for (const s of scopeList) problem(s.name,`Incremental update failed: ${e.message}`); }
+    } catch (e) { overlayCounts.clear();
+      // Keep the uncommitted packet ahead of a newer cursor for the same root.
+      for(const [root,older] of batch){
+        const newer=queue.get(root);
+        if(!newer){queue.set(root,older);continue;}
+        for(const [p,event] of older.events){
+          const current=newer.events.get(p);
+          if(!current)newer.events.set(p,event);
+          else{current.flags|=event.flags;current.scopes=current.scopes&&event.scopes?[...new Set([...current.scopes,...event.scopes])]:undefined;}
+        }
+        newer.gap??=older.gap;
+      }
+      for(const s of scopeList)try{db.query("UPDATE scopes SET problem=? WHERE name=? AND problem IS NULL").run(`Incremental update failed: ${e.message}`,s.name);}catch{}
+      console.error('fe: retrying uncommitted filesystem packet: '+String(e.message).slice(0,300));
+      if(!stopped&&!timer)timer=setTimeout(()=>{timer=undefined;void flush();},1000); }
     finally {
       running = false;
       if (stopped) { db.close(); release(); }
@@ -258,7 +324,7 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
     }
   }
   function configure() {
-    overlayCounts.clear();
+    overlayCounts.clear();mergeScopes.clear();
     child?.kill("SIGKILL"); lines?.close();
     scopeList = indexStatus().filter(s => s.exists && (!names || names.includes(s.name)));
     const roots = [...new Set(scopeList.flatMap(s => s.paths))];
@@ -272,12 +338,17 @@ export async function startLive(names?: string[], delay = 300,canSyncSearch:()=>
       const stat=fs.statSync(path.join(INDEX_DIR,`index-${s.name}.txt`));
       const stamp = `${stat.mtimeMs}:${stat.size}`, old = db.query("SELECT stamp FROM scopes WHERE name=?").get(s.name);
       if (old?.stamp !== stamp) {
-        db.query("DELETE FROM changes WHERE scope=?").run(s.name); db.query("DELETE FROM jobs WHERE scope=?").run(s.name);
+        for(const table of ['changes','merged_changes','tree_barriers','merge_queue'])db.query('DELETE FROM '+table+' WHERE scope=?').run(s.name); db.query("DELETE FROM jobs WHERE scope=?").run(s.name);
         for (const root of s.paths) db.query("DELETE FROM streams WHERE root=?").run(root);
       }
       db.query("INSERT INTO scopes(name,stamp,pid) VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET stamp=excluded.stamp,pid=excluded.pid,problem=CASE WHEN stamp<>excluded.stamp THEN NULL ELSE problem END").run(s.name,stamp,process.pid);
+      const count=db.query('SELECT count(*) AS n FROM changes WHERE scope=?').get(s.name).n;
+      overlayCounts.set(s.name,count);
+      if(db.query('SELECT 1 FROM merge_queue WHERE scope=?').get(s.name))mergeScopes.add(s.name);
+      else if(count>=threshold)markMerge(s.name,db.query('SELECT revision FROM scopes WHERE name=?').get(s.name).revision);
       if (s.options.includeIgnored) db.query("UPDATE scopes SET problem=NULL WHERE name=? AND problem='Ignore rules changed; explicit reconciliation required'").run(s.name);
     } db.exec('COMMIT'); }catch(error){if(db.inTransaction)db.exec('ROLLBACK');throw error;}
+    scheduleMerge();
     if (!roots.length) return;
     const config = roots.map(root => {
       const old = db.query("SELECT uuid,cursor FROM streams WHERE root=?").get(root);

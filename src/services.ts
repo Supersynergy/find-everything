@@ -11,7 +11,7 @@ import { liveRevisionFor, liveStatus } from "./delta";
 import { startLiveProcess } from "./live-process";
 import {defaultIndex} from './catalog';
 import {favoritesFile} from './file-filters';
-import { searchPrepared, searchStreaming, syncSearch, searchIndexPath,prepareSearch,indexProperties,preparedRevision } from './path-search';
+import { searchPrepared, searchStreaming, syncSearch, pendingFilenamePage, searchIndexPath,prepareSearch,indexProperties,preparedRevision } from './path-search';
 import {SearchProcess,SearchWork,searchedCacheKey} from './search-process';
 import {SearchCache,preparedFileStamp} from './search-cache';
 import {learnedSelections,learningFile} from './search-learning';
@@ -21,7 +21,7 @@ import {searchContents,contentPath} from './content-search';
 import {searchMeaning,meaningPath} from './instantfind';
 import {instantEncoder} from './instantfind-worker';
 
-export const VERSION = "0.3.45";
+export const VERSION = "0.3.46";
 function learningStamp(){try{const s=fs.statSync(learningFile());return `${s.mtimeMs}:${s.size}:${Math.floor(Date.now()/3600000)}`;}catch(e){if(e.code==='ENOENT')return 'none';throw e;}}
 
 /** Adds the watcher and age envelope. It stays separate from the snapshot body so a
@@ -78,7 +78,10 @@ async function searchSnapshot(query: string, index: string, limit: number, optio
     // A live writer can hold the accelerator for a moment. Retrying a lock beats
     // every fallback: the complete snapshot means reading the whole index file.
     for (let attempt=0;;attempt++) {
-      try {if(synchronize)syncSearch(index);prepared=searchPrepared(index,parsed,limit,offset,preview);acceleratorProblem=undefined;break;}
+      try {const pending=synchronize?syncSearch(index,preview&&offset===0):undefined;
+        const page=pending&&pendingFilenamePage(index,parsed,limit,offset,pending);
+        if(page)return {query,normalizedQuery,index,...page,snapshotId:page.snapshotId+':relevance-v1:'+learningStamp(),warnings:[...page.warnings,...learningWarnings],stale:true,elapsedMs:Math.round(performance.now()-started)};
+        prepared=searchPrepared(index,parsed,limit,offset,preview);acceleratorProblem=undefined;break;}
       catch(e){
         acceleratorProblem=`Fast lookup is unavailable; using the complete saved snapshot: ${String(e.message).slice(0,300)}`;
         if(attempt>=1||!/SQLITE_BUSY|database (table )?is locked/i.test(String(e.message)))break;
@@ -162,7 +165,7 @@ export function createApi(token: string, localSocket = false): http.Server & {ca
     // The child can synchronize before reading. Bind that returned snapshot to
     // the current key only when all non-snapshot dependencies stayed unchanged.
     const bound=data.engine==='sqlite-trigram'&&prepared&&prepared.live===current.liveRevision&&data[preparedFileStamp]===current.preparedStamp&&data.snapshotId.startsWith(`${prepared.source}:${prepared.live}:${prepared.properties}:`);
-    if(!data.instantfind&&(bound&&searched&&JSON.parse(searched)[0]===current.dependencies||data.engine!=='sqlite-trigram'&&searched===current.key))cache.set(current.key,data);
+    if(!data.snapshotId.includes(':pending:')&&!data.instantfind&&(bound&&searched&&JSON.parse(searched)[0]===current.dependencies||data.engine!=='sqlite-trigram'&&searched===current.key))cache.set(current.key,data);
     return { ...presentSearch({...data,query,normalizedQuery},index), cacheHit: false };
   };
   const server = http.createServer(async (req, res) => {

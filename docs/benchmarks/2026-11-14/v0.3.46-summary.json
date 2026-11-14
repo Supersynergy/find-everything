@@ -1,0 +1,84 @@
+{
+  "version": "0.3.46",
+  "workload": "Fresh Bun process and SQLite connection. One warmup and seven measured runs. Fetch the most recent 256 of 320000 synthetic paths. All variants verified sorted matching results.",
+  "schema": {
+    "rows": 320000,
+    "matched": 256,
+    "result": [
+      {
+        "name": "rowid",
+        "bytes": 58675200,
+        "loadMs": 793.002334,
+        "explain": [
+          "SEARCH changes USING INDEX sqlite_autoindex_changes_1 (scope=?)",
+          "USE TEMP B-TREE FOR ORDER BY"
+        ],
+        "latency": {
+          "unit": "second",
+          "count": 7,
+          "mean": 0.031322625,
+          "stddev": 0.0005123918118240512,
+          "median": 0.031183959,
+          "min": 0.030779292000000003,
+          "max": 0.032282875
+        }
+      },
+      {
+        "name": "revision",
+        "bytes": 66699264,
+        "loadMs": 896.9167499999999,
+        "explain": [
+          "SEARCH changes USING INDEX by_revision (scope=? AND revision>?)",
+          "USE TEMP B-TREE FOR RIGHT PART OF ORDER BY"
+        ],
+        "latency": {
+          "unit": "second",
+          "count": 7,
+          "mean": 0.009849619142857143,
+          "stddev": 0.0005016684578545301,
+          "median": 0.009700458,
+          "min": 0.009224334,
+          "max": 0.010588083
+        }
+      },
+      {
+        "name": "clustered",
+        "bytes": 61292544,
+        "loadMs": 834.6139169999999,
+        "explain": [
+          "SEARCH changes USING INDEX by_revision (scope=? AND revision>?)"
+        ],
+        "latency": {
+          "unit": "second",
+          "count": 7,
+          "mean": 0.010311922571428572,
+          "stddev": 0.00043558299690026785,
+          "median": 0.010585250000000001,
+          "min": 0.009758959000000001,
+          "max": 0.0107355
+        }
+      }
+    ]
+  },
+  "exportCheckpoints": [
+    {
+      "label": "previous",
+      "rows": 150000,
+      "bytes": 16617850,
+      "phase": "done",
+      "checkpoints": 40,
+      "ms": 281.23916699999995
+    },
+    {
+      "label": "candidate",
+      "rows": 150000,
+      "bytes": 16617850,
+      "phase": "done",
+      "checkpoints": 4,
+      "ms": 220.03629199999997
+    }
+  ],
+  "limits": [
+    "Fixture load times are single observations. Database sizes are logical file sizes. Results do not measure SSD lifetime or compare separate database engines."
+  ]
+}

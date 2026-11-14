@@ -31,6 +31,7 @@ export async function compactIndex(index:string,seconds=30,maxRows=1000000){
         input.exec('PRAGMA busy_timeout=1000; BEGIN');
         const get=(key:string)=>input.query('SELECT value FROM meta WHERE key=?').get(key)?.value;
         if(get('source')!==source||get('ready')!=='1')throw new Error('Prepare the current saved snapshot before compacting');
+        if(Number(get('syncPartialRevision')||0)>0)throw new Error('Search lookup has a partially applied revision; finish preparing it before flat export');
         const watermark=Number(get('liveRevision'));if(!Number.isSafeInteger(watermark)||watermark<0)throw new Error('Invalid prepared watermark');
         if(watermark>liveRevisionFor(index))throw new Error('Journal history precedes this prepared snapshot; reconcile explicitly before compacting');
         if(input.query('PRAGMA journal_mode').get().journal_mode!=='delete')throw new Error('Compaction requires a checkpointed lookup');
@@ -47,16 +48,23 @@ export async function compactIndex(index:string,seconds=30,maxRows=1000000){
     db=new Database(path.join(dir,'lookup.sqlite'));db.exec('PRAGMA busy_timeout=1000; PRAGMA cache_size=-4096; CREATE TABLE IF NOT EXISTS compact_specials(path TEXT PRIMARY KEY)');
     const output=fs.openSync(path.join(dir,'paths.txt'),'r+');fs.ftruncateSync(output,state.bytes);
     const deadline=performance.now()+seconds*1000;let processed=0,done=false;
+    let durableBytes=state.bytes;
+    const checkpoint=()=>{
+      fs.fsyncSync(output);
+      saveCompactionState(dir,state!);
+      durableBytes=state!.bytes;
+    };
     try{
       while(processed<maxRows&&performance.now()<deadline){
         const batch=db.query("SELECT f.id,d.path || f.name || CASE WHEN f.slash=1 THEN '/' ELSE '' END AS path FROM files f JOIN directories d ON d.id=f.parent WHERE f.id>? ORDER BY f.id LIMIT ?").all(state.lastId,Math.min(4096,maxRows-processed)) as {id:number;path:string}[];
         if(!batch.length){done=true;break;}
         let text='';for(const row of batch){if(/[\r\n]/.test(row.path)){db.query('INSERT OR IGNORE INTO compact_specials VALUES (?)').run(row.path);state.special++;}else{text+=row.path+'\n';state.rows++;}state.lastId=row.id;processed++;}
         const bytes=Buffer.from(text);let offset=0;while(offset<bytes.length)offset+=fs.writeSync(output,bytes,offset,bytes.length-offset,state.bytes+offset);state.bytes+=bytes.length;
-        fs.fsyncSync(output);saveCompactionState(dir,state);
+        if(state.bytes-durableBytes>=16*1024*1024)checkpoint();
         if(fs.statfsSync(INDEX_DIR).bavail*disk.bsize<=INDEX_FREE_RESERVE_BYTES)throw new Error('Compaction reached disk reserve; resume after freeing space');
         await new Promise<void>(r=>setImmediate(r));
       }
+      if(processed && (state.bytes!==durableBytes || state.special))checkpoint();
     }finally{fs.closeSync(output);}
     if(!done)return {...state,processed,resumable:true};
     if(baseStamp(index)!==state.source)throw new Error('Snapshot changed while compacting');

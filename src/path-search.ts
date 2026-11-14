@@ -4,7 +4,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { acquireLock, validateName } from './catalog';
 import { INDEX_DIR, INDEX_FREE_RESERVE_BYTES, indexPathFor, ParsedQuery } from './engine';
-import { baseStamp, deltaFor, livePath, LIVE_PATH_LIMIT } from './delta';
+import { baseStamp, deltaFor, livePath, hasMergedChanges, journalChanges, liveRevisionFor } from './delta';
 import {omissionRules,omitted,NOISE_NAMES,NOISE_SUFFIXES} from './file-filters';
 import {relevanceOrder,relevanceScore} from './search-ranking';
 import {preparedFileStamp} from './search-cache';
@@ -191,7 +191,52 @@ export function preparedRevision(index:string):{source:string;live:number;proper
   } finally {if(db?.inTransaction)db.exec('ROLLBACK');}
 }
 
-export function syncSearch(index:string) {
+type PendingSearch={source:string;applied:number;target:number};
+type JournalRow={path:string;present:number|null;tree:number;revision:number};
+const SYNC_ROWS=64;
+function journalTables(db:Database){
+  return hasMergedChanges(db)?['changes','merged_changes','tree_barriers']:['changes'];
+}
+/** Pin at most one revision. Resume oversized revisions after a whole path group,
+ * so each same-revision subtree reset precedes its exact descendant additions. */
+function syncSlice(live:Database,index:string,after:number,partialRevision:number,partialPath:string,target:number,budget:number){
+  const tables=journalTables(live);
+  const columns=(t:string)=>t==='tree_barriers'?'path,NULL AS present,1 AS tree,revision':'path,present,tree,revision';
+  const sample=tables.map(t=>live.query('SELECT '+columns(t)+' FROM '+t+' WHERE scope=? AND revision>? ORDER BY revision LIMIT ?').all(index,after,budget+1) as JournalRow[]);
+  const order=(a:JournalRow,b:JournalRow)=>a.revision-b.revision||Buffer.compare(Buffer.from(a.path),Buffer.from(b.path));
+  const rowsNeeded=sample.reduce((n,rows)=>n+rows.length,0);
+  if(rowsNeeded<=budget){
+    const rows=sample.flat().filter(r=>r.revision!==partialRevision||Buffer.compare(Buffer.from(r.path),Buffer.from(partialPath))>0).sort(order);
+    return {rows,applied:target,partialPath:'',partialRevision:0};
+  }
+  // Each table contributes its first budget+1 rows. No missing row can
+  // precede the earliest truncated table's final revision.
+  const all=sample.flat().sort(order);
+  const cutoff=all[budget].revision;
+  const full=all.filter(row=>row.revision<cutoff&&(row.revision!==partialRevision||Buffer.compare(Buffer.from(row.path),Buffer.from(partialPath))>0));
+  if(full.length)return {rows:full,applied:cutoff-1,partialPath:'',partialRevision:0};
+  const first=Math.min(...sample.map(rows=>rows[0]?.revision??Infinity));
+  const cursor=partialRevision===first?partialPath:'';
+  const pages=tables.map((t,i)=>{
+    const subset=sample[i].filter(row=>row.revision===first);
+    if(subset.length<=budget)return subset.filter(row=>Buffer.compare(Buffer.from(row.path),Buffer.from(cursor))>0);
+    // Rowid journals from earlier releases have only (scope,revision). For a
+    // large tied revision, seek the primary path index instead of sorting the
+    // entire revision again on every resumed page. Clustered layers include
+    // their primary path in the revision index already.
+    const largeRowidGroup=t==='changes'&&live.query('SELECT 1 FROM changes WHERE scope=? AND revision=? LIMIT 1 OFFSET 2048').get(index,first);
+    const indexHint=largeRowidGroup?' INDEXED BY sqlite_autoindex_changes_1':'';
+    return live.query('SELECT '+columns(t)+' FROM '+t+indexHint+' WHERE scope=? AND revision=? AND path>? ORDER BY path LIMIT ?').all(index,first,cursor,budget+1) as JournalRow[];
+  });
+  // SQLite BINARY compares UTF-8 byte sequences. JS UTF-16 ordering differs for
+  // supplementary characters and would skip paths at a durable page boundary.
+  const rows=pages.flat().map(row=>({row,key:Buffer.from(row.path)})).sort((a,b)=>Buffer.compare(a.key,b.key));
+  const boundary=rows[budget-1]?.key;
+  const selected=boundary?rows.filter(({key})=>Buffer.compare(key,boundary)<=0):rows;
+  if(selected.length<rows.length)return {rows:selected.map(v=>v.row),applied:first-1,partialPath:selected.at(-1)!.row.path,partialRevision:first};
+  return {rows:selected.map(v=>v.row),applied:first,partialPath:'',partialRevision:0};
+}
+export function syncSearch(index:string,interactive=false):PendingSearch|undefined {
   const file=searchIndexPath(index);
   // A canceled disposable reader may leave a hot rollback journal. Recover in
   // a writable connection before opening the normal read-only snapshot handle.
@@ -202,37 +247,47 @@ export function syncSearch(index:string) {
   }
   const current=openProperties(index);if(!current||!fs.existsSync(livePath()))return;
   const source=baseStamp(index),after=Number(getMeta(current,'liveRevision'));
-  const live=new Database(livePath(),{readonly:true});let changes:any[],revision:number;
+  const live=new Database(livePath(),{readonly:true});
+  let release:(()=>void)|undefined,db:Database|undefined;
   try {
-    live.exec('BEGIN');
+    live.exec('PRAGMA busy_timeout=1000; BEGIN');
     const state=live.query('SELECT revision FROM scopes WHERE name=? AND stamp=?').get(index,source);
     if(!state||state.revision===after)return;
-    revision=state.revision;
-    changes=live.query('SELECT path,present,tree,revision FROM changes WHERE scope=? AND revision>? ORDER BY revision,path').all(index,after);
-  } finally {live.close();}
-  if(changes.length>LIVE_PATH_LIMIT)throw new Error(`Search accelerator has over ${LIVE_PATH_LIMIT} pending changes; prepare it again explicitly`);
-  const release=acquireLock(file+'.lock');let db:Database|undefined;
-  try {
+    const revision=state.revision;
+    try{release=acquireLock(file+'.lock');}
+    catch(error){if(interactive&&String(error.message).includes('another process holds'))return {source,applied:after,target:revision};throw error;}
     closeProperties(index);db=new Database(file);tune(db);
     if(getMeta(db,'source')!==source)return;
-    const committed=Number(getMeta(db,'liveRevision'));if(committed>=revision)return;
+    let committed=Number(getMeta(db,'liveRevision'));if(committed>=revision)return;
+    const bounded=hasMergedChanges(live);
     let rowCount=getMeta(db,'rowCountVersion')==='1'?Number(getMeta(db,'indexedRows')):db.query('SELECT count(*) AS n FROM files').get().n;
     const add=inserter(db),remove=db.query('DELETE FROM files WHERE parent=(SELECT id FROM directories WHERE path=?) AND name=?');
     const metadata=db.query('UPDATE files SET size=?,mtime=?,dir=?,slash=CASE WHEN ?=0 THEN 0 ELSE slash END WHERE parent=(SELECT id FROM directories WHERE path=?) AND name=?');
     const previousSlash=db.query('SELECT slash FROM files WHERE parent=(SELECT id FROM directories WHERE path=?) AND name=?');
-    let namesChanged=false;
-    db.transaction(()=>{
-      for(const c of changes){if(c.revision<=committed)continue;const s=splitPath(c.path);
-        if(c.tree){const prefix=c.path.replace(/\/$/,'')+'/';db.query('DELETE FROM files WHERE parent IN (SELECT id FROM directories WHERE path>=? AND path<?)').run(prefix,prefix.slice(0,-1)+'0');const removed=directChanges(db);rowCount-=removed;namesChanged=namesChanged||removed>0;}
-        if(!c.present){remove.run(s.parent,s.name);const removed=directChanges(db);rowCount-=removed;namesChanged=namesChanged||removed>0;}
-        else {const added=add(c.path);rowCount+=added;namesChanged=namesChanged||added>0;try{const stat=fs.statSync(c.path),directory=Number(stat.isDirectory());if(!directory&&!added&&previousSlash.get(s.parent,s.name)?.slash)namesChanged=true;metadata.run(stat.size,stat.mtimeMs,directory,directory,s.parent,s.name);}catch(e){if(!['ENOENT','ENOTDIR','EACCES','EPERM'].includes(e.code))throw e;}}
-      }
-      setMeta(db,'namesRevision',Number(getMeta(db,'namesRevision')??committed)+(namesChanged?1:0));
-      setMeta(db,'liveRevision',revision);setMeta(db,'propertiesRevision',Number(getMeta(db,'propertiesRevision'))+1);
-      setMeta(db,'indexedRows',rowCount);
-      setMeta(db,'rowCountVersion',1);
-    })();
-  } finally {try{db?.close();}finally{release();}}
+    // Pin the observed target in this WAL read transaction. Exact/final queries
+    // finish this generation in durable chunks even while new revisions arrive.
+    while(committed<revision){
+      const slice=bounded?syncSlice(live,index,committed,Number(getMeta(db,'syncPartialRevision')||0),getMeta(db,'syncPartialPath')||'',revision,interactive?SYNC_ROWS:2048):undefined;
+      const changes=slice?.rows??journalChanges(live,index,committed);
+      let namesChanged=false;
+      db.transaction(()=>{
+        for(const c of changes){const s=splitPath(c.path);
+          if(c.tree){const prefix=c.path.replace(/\/$/,'')+'/';db.query('DELETE FROM files WHERE parent IN (SELECT id FROM directories WHERE path>=? AND path<?)').run(prefix,prefix.slice(0,-1)+'0');const removed=directChanges(db);rowCount-=removed;namesChanged=namesChanged||removed>0;}
+          if(c.present===null)continue;
+          if(!c.present){remove.run(s.parent,s.name);const removed=directChanges(db);rowCount-=removed;namesChanged=namesChanged||removed>0;}
+          else {const added=add(c.path);rowCount+=added;namesChanged=namesChanged||added>0;try{const stat=fs.statSync(c.path),directory=Number(stat.isDirectory());if(!directory&&!added&&previousSlash.get(s.parent,s.name)?.slash)namesChanged=true;metadata.run(stat.size,stat.mtimeMs,directory,directory,s.parent,s.name);}catch(e){if(!['ENOENT','ENOTDIR','EACCES','EPERM'].includes(e.code))throw e;}}
+        }
+        setMeta(db,'namesRevision',Number(getMeta(db,'namesRevision')??committed)+(namesChanged?1:0));
+        setMeta(db,'liveRevision',slice?.applied??revision);
+        setMeta(db,'syncPartialRevision',slice?.partialRevision??0);setMeta(db,'syncPartialPath',slice?.partialPath??'');
+        setMeta(db,'propertiesRevision',Number(getMeta(db,'propertiesRevision'))+1);
+        setMeta(db,'indexedRows',rowCount);
+        setMeta(db,'rowCountVersion',1);
+      })();
+      committed=slice?.applied??revision;
+      if(interactive&&committed<revision)return {source,applied:committed,target:revision};
+    }
+  } finally {try{db?.close();}finally{live.close();release?.();}}
 }
 
 export async function indexProperties(index:string,maxFiles=10000,seconds=60) {
@@ -534,6 +589,60 @@ export function searchPrepared(index:string,pq:ParsedQuery,limit:number,offset:n
   }
 }
 
+/** An interactive backlog page uses the newest bounded journal entries and an
+ * indexed basename lookup. Every candidate is checked against the exact latest
+ * path and ancestor barriers in the same read transaction. */
+export function pendingFilenamePage(index:string,pq:ParsedQuery,limit:number,offset:number,pending:PendingSearch) {
+  if(offset||pq.sizeFilter||pq.dmFilter||['new','old','big','small'].includes(pq.sort||''))return;
+  const terms=[...pq.fuzzy.flatMap(t=>t.replace(/^'/,'').split('|')),...pq.constraints.filter(c=>!c.negate&&c.field!=='folder').map(c=>c.literal||'')].filter(t=>t.length>=2);
+  if(!terms.length)return;
+  const prepared=openReady(index);if(!prepared)return;
+  const live=new Database(livePath(),{readonly:true});
+  try{
+    live.exec('PRAGMA busy_timeout=1000;BEGIN');
+    const state=live.query('SELECT revision FROM scopes WHERE name=? AND stamp=?').get(index,pending.source);
+    if(!state||baseStamp(index)!==pending.source)return;
+    const tables=journalTables(live).filter(t=>t!=='tree_barriers');
+    const candidates=new Map<string,string>(),matches=queryMatcher(pq);
+    const addCandidate=(p:string)=>{
+      const key=p.replace(/\/$/,'')||'/';
+      if(matches(p)&&(!candidates.has(key)||p.endsWith('/')))candidates.set(key,p);
+    };
+    for(const t of tables){
+      const rows=live.query('SELECT path,present FROM '+t+' WHERE scope=? AND revision>? ORDER BY revision DESC LIMIT 4096').iterate(index,pending.applied);
+      for(const row of rows)if(row.present)addCandidate(row.path);
+    }
+    // Exact basename seeds also keep stable files visible amid unrelated repairs.
+    for(const term of terms.slice(0,8)){
+      const name=path.basename(term).normalize('NFC').toLowerCase();
+      if(path.isAbsolute(term)&&matches(term)&&tables.some(t=>live.query('SELECT 1 FROM '+t+' WHERE scope=? AND path=? AND present=1').get(index,term)))addCandidate(term);
+      const rows=prepared.query("SELECT "+FULL+" AS path FROM files f INDEXED BY file_names JOIN directories d ON d.id=f.parent WHERE f.nameKey>=? AND f.nameKey<? ORDER BY f.nameKey LIMIT ?").iterate(name,name+String.fromCodePoint(0x10FFFF),limit+1);
+      for(const row of rows)addCandidate(row.path);
+    }
+    const exact=live.query(tables.map(t=>'SELECT present,revision FROM '+t+' WHERE scope=? AND path=?').join(' UNION ALL ')+' ORDER BY revision DESC LIMIT 1');
+    const barriers=live.query([...tables.map(t=>'SELECT revision FROM '+t+' WHERE scope=? AND path=? AND tree=1'),...(tables.length===2?['SELECT revision FROM tree_barriers WHERE scope=? AND path=?']:[])].join(' UNION ALL ')+' ORDER BY revision DESC LIMIT 1');
+    const ancestors=new Map<string,number>();
+    const cutoff=(p:string):number=>{
+      let value=ancestors.get(p);
+      if(value===undefined){
+        value=barriers.get(...Array.from({length:tables.length===2?3:1},()=>[index,p]).flat())?.revision??-1;
+        if(p!==path.dirname(p))value=Math.max(value,cutoff(path.dirname(p)));
+        ancestors.set(p,value);
+      }
+      return value;
+    };
+    const heap=new PageHeap(limit,pq.sort,(!pq.sort&&pq.smart)||pq.sort==='relevance'?pq:undefined);
+    for(const [clean,p] of candidates){
+      const own=exact.get(...tables.flatMap(()=>[index,clean]));
+      if(own?.present===0||cutoff(path.dirname(clean))>(own?.revision??pending.applied))continue;
+      heap.add(p);
+    }
+    return {paths:heap.page(0),offset:0,nextOffset:null,snapshotId:pending.source+':'+pending.applied+':pending:'+state.revision,
+      snapshot:true,engine:'sqlite-trigram',provisional:true,complete:false,coverage:{matched:null,metadataUnknown:null},
+      warnings:['The filename lookup is catching up. Showing verified recent matches and basename prefixes. Counts and pagination are pending.']};
+  }finally{live.close();}
+}
+
 class PageHeap {
   values:{p:string;key:string;rank:number}[]=[];bytes=0;
   constructor(readonly capacity:number,readonly mode='name',readonly query?:ParsedQuery){}
@@ -553,7 +662,7 @@ export async function searchStreaming(index:string,pq:ParsedQuery,limit:number,o
   const input=fs.createReadStream(indexPathFor(index),{highWaterMark:256*1024}),lines=createInterface({input,crlfDelay:Infinity});
   try {let n=0;for await(const p of lines){if(++n%4096===0&&performance.now()-start>10000)throw new Error(`Complete search exceeded 10 seconds; run fe prepare --index ${index}`);if(p&&delta.visible(p,true))take(p);}for(const p of delta.additions)take(p);}
   finally{lines.close();input.destroy();}
-  if(baseStamp(index)!==stamp||deltaFor(index).revision!==delta.revision)throw new Error('Index changed during search; restart pagination');
+  if(baseStamp(index)!==stamp||liveRevisionFor(index)!==delta.revision)throw new Error('Index changed during search; restart pagination');
   const paths=heap.page(offset),matched=pq.sizeFilter||pq.dmFilter?0:count;
   return {paths,offset,nextOffset:offset+paths.length<matched?offset+paths.length:null,snapshotId:`${stamp}:${delta.revision}:stream`,snapshot:true,complete:!properties,
     coverage:{matched,metadataUnknown:properties?count:0},engine:'complete-stream',warnings:[`Prepare fast indexed lookup with fe prepare --index ${index}; this search reads the existing path snapshot only.`,...(properties?[`File properties are not indexed; run fe properties --index ${index}.`]:[]),'Configured exclusions and macOS permissions apply.']};
