@@ -26,9 +26,9 @@ Local-first file search for macOS. Find a filename across folders, combine preci
 
 **From 0.3.40:** resume compaction of saved snapshots and journal changes, retain exact counts across search-process restarts for large indexes, and explicitly index scanned PDFs/images with local OCR. In Settings → Indexes, use **Merge saved changes (resume)** or **Index with local OCR**. Existing journal gaps require an explicit rebuild and remain visible after compaction. [Details and limits](docs/MAINTENANCE-0.3.40.md).
 
-[**Get the 0.3.48 preview**](https://github.com/Supersynergy/find-everything/releases/tag/v0.3.48) · [Features](#features) · [Search examples](#one-line-many-ways-to-find-it) · [Meaning search](docs/INSTANTFIND.md) · [Build from source](#build-from-source) · [CLI](#cli-quick-start) · [Privacy](#local-data-and-privacy) · [Release notes](docs/release/RELEASE-NOTES.md)
+[**Get the 0.3.48 release**](https://github.com/Supersynergy/find-everything/releases/tag/v0.3.48) · [Features](#features) · [Search examples](#one-line-many-ways-to-find-it) · [Meaning search](docs/INSTANTFIND.md) · [Build from source](#build-from-source) · [CLI](#cli-quick-start) · [Privacy](#local-data-and-privacy) · [Release notes](docs/release/RELEASE-NOTES.md)
 
-> **Apple Silicon preview — not notarized.** The downloadable build is locally signed, not signed with a trusted Developer ID or Apple-notarized. Gatekeeper may refuse it. We do not recommend disabling Gatekeeper, removing quarantine or changing privacy permissions to bypass this. Build from source with your own signing identity, or wait for a notarized release. Intel and older macOS versions have not been verified.
+> **Apple Silicon release — not notarized.** The downloadable build is locally signed, not signed with a trusted Developer ID or Apple-notarized. Gatekeeper may refuse it. We do not recommend disabling Gatekeeper, removing quarantine or changing privacy permissions to bypass this. Build from source with your own signing identity, or wait for a notarized release. Intel and older macOS versions have not been verified.
 
 
 ## Features
@@ -57,7 +57,7 @@ Text/code files use UTF-8; extractable PDFs use the bundled local PDFKit helper,
 
 Search prepared media by duration, channel count, sample rate, bitrate or image/video dimensions. `audio: duration:<1s` finds short audio by metadata, regardless of its filename. Optional local sound search ranks prepared audio by descriptions such as `(kurze düstere Lasersounds)`.
 
-**Setup matters:** media properties need explicit extraction. Sound descriptions additionally require checkout-based runtime/model setup and audio analysis. Models and their runtime dependencies are **not bundled** in the preview archive; acoustic results are approximate.
+**Setup matters:** media properties need explicit extraction. Sound descriptions additionally require checkout-based runtime/model setup and audio analysis. Models and their runtime dependencies are **not bundled** in the release archive; acoustic results are approximate.
 
 ### Do something with the result
 
@@ -177,7 +177,7 @@ These are rendered production views with fixture progress, not scans of personal
 
 </details>
 
-## Get the preview
+## Get the release
 
 The complete app archive requires **macOS 15 or later on Apple Silicon**; its native helper binaries target macOS 15. It was built and checked on macOS 15.8.2. The source app/CLI target alone is not the compatibility floor of the complete bundle.
 
@@ -193,11 +193,11 @@ Download the files to the same directory and check them before opening anything:
 shasum -a 256 -c SHA256SUMS.txt
 ```
 
-Checksums detect changed downloads; they do **not** substitute for trusted publisher signing or notarization. The remote `install.sh` requires its pinned publisher **and** Gatekeeper approval. It deliberately refuses an unapproved preview and preserves an existing installation. It does not select this prerelease as the latest stable download.
+Checksums detect changed downloads; they do **not** substitute for trusted publisher signing or notarization. The remote `install.sh` requires its pinned publisher **and** Gatekeeper approval. It deliberately refuses a build rejected by Gatekeeper and preserves an existing installation.
 
 ### Build from source
 
-Prerequisites: macOS, Xcode Command Line Tools/Swift, Bun and the optional search tools you intend to use. The preview was built on Apple Silicon with Bun 1.4.4; other environments need their own verification. Install prerequisites using a package manager you trust. The app no longer downloads and executes missing tool archives itself.
+Prerequisites: macOS, Xcode Command Line Tools/Swift, Bun and the optional search tools you intend to use. The release was built on Apple Silicon with Bun 1.4.4; other environments need their own verification. Install prerequisites using a package manager you trust. The app no longer downloads and executes missing tool archives itself.
 
 ```sh
 git clone https://github.com/Supersynergy/find-everything.git
@@ -291,7 +291,7 @@ For uninstall/cleanup, first quit the app and stop only the Find Everything agen
 
 Release checks cover project tests/typechecking, native model/navigation/table/presentation tests, bundle signature and version consistency, archive checksums, included notices and product-image presence. Independent report-only passes covered data preservation, security boundaries, licences/privacy, resource bounds and UI source states. These are scoped checks, not a security or legal certification.
 
-Manual screen/keyboard/VoiceOver acceptance has not been completed for this preview. Synthetic offscreen rendering does not replace it. Long-running memory/recovery behaviour, Intel, older macOS, the bundled runtime's complete advisory coverage and a complete third-party legal review remain unverified. The JavaScript dependency audit was checked for 0.3.1. See [the register](COMPLIANCE.md).
+Manual screen/keyboard/VoiceOver acceptance has not been completed for this release. Synthetic offscreen rendering does not replace it. Long-running memory/recovery behaviour, Intel, older macOS, the bundled runtime's complete advisory coverage and a complete third-party legal review remain unverified. The JavaScript dependency audit was checked for 0.3.1. See [the register](COMPLIANCE.md).
 
 ## Contributing
 

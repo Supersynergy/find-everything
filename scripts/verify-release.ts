@@ -19,7 +19,7 @@ function check(ok: unknown, message: string): asserts ok { if (!ok) throw new Er
 const version = (JSON.parse(read("package.json")) as { version: string }).version;
 const manifest = JSON.parse(read("release-artifacts/release.json")) as Manifest;
 check(version === '0.3.48' && manifest.version === version && manifest.tag === `v${version}`, "Version/tag mismatch");
-check(manifest.preview === true && manifest.notarized === false && manifest.architecture === "arm64", "Preview must not claim notarized, stable or universal distribution");
+check(manifest.preview === false && manifest.notarized === false && manifest.architecture === "arm64", "Expected a regular arm64 release with accurate notarization metadata");
 check(read("src/services.ts").includes(`export const VERSION = "${version}"`), "CLI source version mismatch");
 check(read("app/bundle-app.sh").split(`<string>${version}</string>`).length === 3, "Native bundle version mismatch");
 check(read("README.md").includes(`releases/tag/v${version}`), "README does not link current release");
@@ -59,12 +59,14 @@ for (const name of ['fe','fe-media-probe','fe-events','fe-content-probe']) {
   run('codesign',['--verify','--strict',join(app,'Contents/Helpers',name)]);
 }
 check(read('docs/release/images/feature-map.svg').includes('<svg'), 'Feature map missing');
-console.log(JSON.stringify({ local: "passed", version, signed: true, notarized: false, preview: true, assets: manifest.assets.length, images: productImages.length+1 }));
+console.log(JSON.stringify({ local: "passed", version, signed: true, notarized: false, preview: false, assets: manifest.assets.length, images: productImages.length+1 }));
 
 if (process.argv.includes("--published")) {
   const repo = "Supersynergy/find-everything";
   const remote = JSON.parse(run("gh", ["api", `repos/${repo}/releases/tags/${manifest.tag}`])) as RemoteRelease;
-  check(remote.draft === false && remote.prerelease === true && remote.tag_name === manifest.tag, "Release is not a visible, correctly labelled preview");
+  check(remote.draft === false && remote.prerelease === false && remote.tag_name === manifest.tag, "Expected a published regular release");
+  const latest = JSON.parse(run("gh", ["api", `repos/${repo}/releases/latest`])) as RemoteRelease;
+  check(latest.tag_name === manifest.tag, "Latest release points to another version");
   for (const asset of manifest.assets) {
     const published = remote.assets.find(item => item.name === asset.name);
     check(published?.size === asset.bytes && published.state === "uploaded" && published.digest === `sha256:${asset.sha256}`, `Published archive differs: ${asset.name}`);

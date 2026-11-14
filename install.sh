@@ -14,9 +14,9 @@ CANDIDATE="$WORK/bundle/Find Everything.app"
 # Public trust anchor, independent of the downloaded candidate's own requirement.
 EXPECTED_REQUIREMENT='identifier "com.supersynergy.findeverything" and certificate leaf = H"E3CCA459395B95C297D5EA7954398559810A4819"'
 codesign --verify --deep --strict --test-requirement "=$EXPECTED_REQUIREMENT" "$CANDIDATE"
-# Preview artifacts are locally signed, not notarized: refuse them here.
+# Check Gatekeeper approval before changing the installation.
 if ! spctl --assess --type execute "$CANDIDATE"; then
-  echo 'This download is not approved for normal macOS distribution. Existing installation kept; see the preview source-build instructions.' >&2
+  echo 'This download is not approved for normal macOS distribution. Existing installation kept; see the source-build instructions.' >&2
   exit 1
 fi
 if [ ! -x "$CANDIDATE/Contents/Helpers/fe" ]; then echo 'Release is missing its signed bundled CLI; existing installation kept.' >&2; exit 1; fi

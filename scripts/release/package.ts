@@ -16,7 +16,7 @@ fs.mkdirSync(out,{recursive:true});
 const archive=path.join(out,'FindEverything.app.zip');
 run('/usr/bin/ditto',['-c','-k','--sequesterRsrc','--keepParent',app,archive]);
 const files=run('git',['ls-files','src','runtime/instantfind','app/Sources','app/MediaProbe.swift','app/FileEvents.swift','app/ContentProbe.swift','app/Package.swift','app/bundle-app.sh','package.json']).trim().split('\n').filter(Boolean);
-const manifest={version,tag:`v${version}`,architecture:'arm64',minimumMacOS:'15.0',preview:true,notarized:false,
+const manifest={version,tag:`v${version}`,architecture:'arm64',minimumMacOS:'15.0',preview:false,notarized:false,
   signing:'Existing local certificate; not a trusted Developer ID distribution',
   codeFiles:files,assets:[{name:path.basename(archive),bytes:fs.statSync(archive).size,sha256:sha(archive)}]};
 const manifestFile=path.join(out,'release.json');fs.writeFileSync(manifestFile,JSON.stringify(manifest,null,2)+'\n');
