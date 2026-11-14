@@ -99,6 +99,23 @@ test('live subtree deletion below a non-BMP folder removes every descendant',()=
   }finally{f.close();}
 });
 
+test('status counts both known properties on sparse and dense legacy indexes',()=>{
+  const f=fixture();
+  try {
+    f.run('index',f.root,'--name','demo');
+    f.snapshot(Array.from({length:128},(_,i)=>path.join(f.root,String(i))));
+    f.run('prepare','--index','demo');
+    const db=new Database(path.join(f.cache,'search-demo.sqlite'));
+    const known=()=>f.run('status').indexes.find((i:any)=>i.name==='demo').search.propertiesKnown;
+    try {
+      db.exec("UPDATE meta SET value='2' WHERE key='version'; UPDATE files SET size=0 WHERE id<=3; UPDATE files SET mtime=0 WHERE id BETWEEN 2 AND 4");
+      assert.equal(known(),2);
+      db.exec('UPDATE files SET mtime=0');
+      assert.equal(known(),3);
+    }finally{db.close();}
+  }finally{f.close();}
+});
+
 test('legacy accelerators remain usable and normalize Unicode without rebuilding or query writes',()=>{
   const f=fixture();
   try {

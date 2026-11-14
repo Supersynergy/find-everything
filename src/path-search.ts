@@ -165,9 +165,16 @@ async function prepareSnapshot(index:string,seconds:number,maxRows:number) {
 
 export function searchIndexStatus(index:string,countProperties=true) {
   const db=openReady(index);if(!db)return {index,ready:false};
-  return {index,ready:true,rows:connections.get(index)!.rows,
-    propertiesKnown:countProperties?db.query('SELECT count(*) AS n FROM files WHERE size IS NOT NULL AND mtime IS NOT NULL').get().n:null,
-    propertiesCountExact:countProperties,
+  const rows=connections.get(index)!.rows;
+  let propertiesKnown:number|null=null;
+  if(countProperties){
+    // Bound the covering-index probe before choosing scattered lookups or a table scan.
+    const threshold=Math.min(32768,Math.floor(rows/16));
+    const dense=db.query('SELECT 1 FROM files WHERE mtime IS NOT NULL LIMIT 1 OFFSET ?').get(threshold);
+    const from=dense?'files':'files INDEXED BY file_modified';
+    propertiesKnown=db.query(`SELECT count(*) AS n FROM ${from} WHERE size IS NOT NULL AND mtime IS NOT NULL`).get().n;
+  }
+  return {index,ready:true,rows,propertiesKnown,propertiesCountExact:countProperties,
     bytes:fs.statSync(searchIndexPath(index)).size,liveRevision:Number(getMeta(db,'liveRevision')),propertiesRevision:Number(getMeta(db,'propertiesRevision'))};
 }
 
