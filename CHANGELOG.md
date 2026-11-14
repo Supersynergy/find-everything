@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.47 — 2026-11-14
+
+- Speed up exact file-property counts on sparse indexes in `fe status`.
+
 ## 0.3.46 — 2026-11-14
 
 - Consolidate pending path changes during live indexing and index recent changes by scope and revision.
